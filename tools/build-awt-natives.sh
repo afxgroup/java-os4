@@ -30,7 +30,7 @@ OUT=$BUILD_ROOT/openjdk-natives
 COMPAT="$OUT/compat"
 HDR="$OUT/headers"
 RTJAR=$BOOT_JDK/jre/lib/rt.jar
-CC="ppc-amigaos-gcc -mcrt=clib4 -fPIC -O2 -w -fcommon"
+CC="ppc-amigaos-gcc -mcrt=clib4 -fPIC -O2 -w -fcommon -gstabs"
 mkdir -p "$OUT/libawt" "$HDR"
 
 SH=$J/src/share/native/sun

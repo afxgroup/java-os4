@@ -6,6 +6,7 @@
 # Track only our patches under docs/ / vendor patches if/when they exist.
 /vendor/jamvm/
 /vendor/icedtea8/
+/vendor/openjdk8/
 /vendor/fallback/
 /vendor/*.tar.*
 /vendor/*.zip
@@ -38,3 +39,5 @@ plan-*.md
 
 # The OpenJDK 17 (Zero) spike lives on the jdk17 branch, not on main.
 /jdk17/
+
+.vscode

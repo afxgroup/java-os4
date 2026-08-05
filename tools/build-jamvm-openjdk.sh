@@ -52,6 +52,16 @@ for h in classlib.h classlib-defs.h classlib-excep.h classlib-symbol.h; do
     cp -f "classlib/openjdk/$h" "$h"
 done
 
+# AmigaOS runtime: prefer JAVA_HOME when resolving java.home, as dladdr-based
+# nativeJVMPath() can be unreliable on some targets during early startup.
+PROP_C="classlib/openjdk/properties.c"
+if [ -f "$PROP_C" ] && ! grep -q "#include <stdlib.h>" "$PROP_C"; then
+    sed -i 's@#include <string.h>@#include <string.h>\n#include <stdlib.h>@' "$PROP_C"
+fi
+if [ -f "$PROP_C" ] && ! grep -q "amiga JAVA_HOME fallback" "$PROP_C"; then
+    perl -0pi -e 's@char \*classlibDefaultJavaHome\(\) \{\n@char *classlibDefaultJavaHome() {\n#ifdef __amigaos4__\n    const char *java_home = getenv("JAVA_HOME");\n    if(java_home != NULL && *java_home != '\''\\0'\'') {\n        char *home = sysMalloc(strlen(java_home) + 1);\n        strcpy(home, java_home);\n        return home;\n    }\n    /* amiga JAVA_HOME fallback */\n#endif\n@s' "$PROP_C"
+fi
+
 INC="-I . -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib/openjdk"
 # VERSION_* are JamVM's version (2.0.1), normally from config.h; the openjdk
 # classlib's jvm.c (JVM_GetVersionInfo) needs them (gnuclasspath has no jvm.c).
@@ -59,7 +69,7 @@ INC="-I . -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib
 CFLAGS="-mcrt=clib4 -O0 -W -Wall -fPIC -D__USE_INLINE__ -DUSE_ZIP \
  -DOPENJDK_VERSION=8 -DJSR292 -DJSR308 -DJSR335 -DJSR901 \
  -DVERSION_MAJOR=2 -DVERSION_MINOR=0 -DVERSION_MICRO=1 \
- -fcommon -fgnu89-inline $INC"
+ -fcommon -fgnu89-inline -gstabs $INC"
 OUT=/tmp/build-openjdk
 rm -rf "$OUT"; mkdir -p "$OUT"
 OBJS=""        # libcore objects -> libjvm.so

@@ -54,7 +54,7 @@ INC="-I . -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib
 # String.hashCode()/equals() see all strings as empty -> the System properties
 # Hashtable collapses to a single entry (file.separator etc. read back as garbage),
 # breaking File.<clinit>, java.library.path, and native lib loading.
-CFLAGS="-mcrt=clib4 -O0 -W -Wall -D__USE_INLINE__ -DUSE_ZIP -DSHARED_CHAR_BUFFERS -fcommon -fgnu89-inline $INC"
+CFLAGS="-mcrt=clib4 -O0 -W -Wall -D__USE_INLINE__ -DUSE_ZIP -DSHARED_CHAR_BUFFERS -fcommon -fgnu89-inline -gstabs $INC"
 OUT=/tmp/build
 mkdir -p "$OUT"
 OBJS=""

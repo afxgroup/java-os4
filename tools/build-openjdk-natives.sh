@@ -29,7 +29,7 @@ OUT=$BUILD_ROOT/openjdk-natives
 mkdir -p "$OUT"
 # -fcommon: OpenJDK (like the 2016 JamVM tree) defines globals in headers without
 # extern (e.g. parentPathv); gcc 10+ defaults to -fno-common -> multiple-definition.
-CC="ppc-amigaos-gcc -mcrt=clib4 -fPIC -O2 -w -fcommon"
+CC="ppc-amigaos-gcc -mcrt=clib4 -fPIC -O2 -w -fcommon -gstabs"
 
 # Compatibility shims for unix headers clib4 lacks (OpenJDK's md code targets unix;
 # amigaos/clib4 differs).  Kept here (not by editing OpenJDK source) so the drop

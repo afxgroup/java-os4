@@ -35,10 +35,11 @@ SRC=$PROJECT_ROOT/src/installer
 OUT="$B/release"
 R="$OUT/Java-OS4"          # distribution drawer
 RT="$R/content/Java"       # runtime payload (installed into the chosen drawer)
+SOBJ="$RT/Sobjs"           # runtime shared C/support objects
 
 echo "=== Java-OS4 $VER -- assembling $R ==="
 rm -rf "$OUT"
-mkdir -p "$RT/lib/fonts"
+mkdir -p "$RT/lib/fonts" "$SOBJ"
 
 # --- runtime: VM + launcher -----------------------------------------------
 cp "$B/jamvm-openjdk" "$RT/jamvm-openjdk"
@@ -47,14 +48,15 @@ cp "$B/libjvm.so"     "$RT/"
 # `java` launcher.  It does NOT change directory: the VM finds its own runtime
 # (boot jars, java.home, native libs) relative to PROGDIR: -- jamvm-openjdk's own
 # directory -- so the caller's shell cwd is left untouched and the user's
-# relative -cp resolves against THEIR directory.  LD_LIBRARY_PATH="PROGDIR:"
-# points the ELF loader at the bundled sobjs beside the VM regardless of cwd.
+# relative -cp resolves against THEIR directory.  LD_LIBRARY_PATH="PROGDIR:Sobjs"
+# points the ELF loader at the bundled clib4/support sobjs in Sobjs/ regardless of cwd.
 {
     echo ".KEY args/F"
     echo ".BRA {"
     echo ".KET }"
     echo ";\$VER: Java-OS4 $PVER ($DATE) OpenJDK $JVER"
-    echo 'SetEnv LD_LIBRARY_PATH "PROGDIR:"'
+    echo 'SetEnv LD_LIBRARY_PATH "PROGDIR:Sobjs"'
+    echo 'SetEnv JAVA_HOME "PROGDIR:"'
     echo "JAVA:jamvm-openjdk {args}"
 } > "$RT/java"
 
@@ -88,11 +90,11 @@ else
 fi
 
 cp "$CLIB4_SO_DIR/libc.so" "$CLIB4_SO_DIR/libpthread.so" \
-    "$CLIB4_SO_DIR/libm.so" "$CLIB4_SO_DIR/librt.so" "$RT/"
+    "$CLIB4_SO_DIR/libm.so" "$CLIB4_SO_DIR/librt.so" "$SOBJ/"
 [ -n "$LIBZ_SO_FILE" ] && [ -f "$LIBZ_SO_FILE" ] || { echo "Missing libz.so.1 for packaging"; exit 1; }
 [ -n "$LIBGCC_SO_FILE" ] && [ -f "$LIBGCC_SO_FILE" ] || { echo "Missing libgcc.so for packaging"; exit 1; }
-cp "$LIBZ_SO_FILE" "$RT/libz.so.1"
-cp "$LIBGCC_SO_FILE" "$RT/"
+cp "$LIBZ_SO_FILE" "$SOBJ/libz.so.1"
+cp "$LIBGCC_SO_FILE" "$SOBJ/"
 
 # --- runtime: clib4.library (the C runtime the VM + .so stubs call into) ---
 # The bundled .so stubs (libc.so, ...) are clib4.library front-ends; the real
@@ -109,6 +111,15 @@ cp "$JDK8/jre/lib/rt.jar" "$JDK8/jre/lib/charsets.jar" "$JDK8/jre/lib/jce.jar" \
     "$JDK8/jre/lib/jsse.jar" "$JDK8/jre/lib/resources.jar" "$RT/"
 cp "$N/niopatch.zip"     "$RT/"
 cp "$B/amigatoolkit.zip" "$RT/"
+
+# JamVM -jar dispatch path requires jamvm.java.lang.JarLauncher to be available
+# on the boot class path.  In OpenJDK mode JamVM includes java.home/classes by
+# default, so compile and ship the class there.
+JARLAUNCHER_SRC="$PROJECT_ROOT/vendor/jamvm/src/classlib/gnuclasspath/lib/jamvm/java/lang/JarLauncher.java"
+[ -f "$JARLAUNCHER_SRC" ] || { echo "Missing JarLauncher source: $JARLAUNCHER_SRC"; exit 1; }
+mkdir -p "$RT/classes"
+"$JDK8/bin/javac" -source 8 -target 8 -bootclasspath "$JDK8/jre/lib/rt.jar" \
+    -d "$RT/classes" "$JARLAUNCHER_SRC"
 
 # --- examples + test suite (runnable out of the box) ----------------------
 # 0.5.0 shipped nothing to run but `java -version`; bundle a headless demo, a

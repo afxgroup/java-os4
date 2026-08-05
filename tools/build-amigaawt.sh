@@ -6,7 +6,7 @@ set -e
 J=${OPENJDK8_SRC:-$BUILD_ROOT/openjdk8/jdk-3334efeacd83}
 [ -d "$J" ] || { echo "FATAL: OpenJDK 8 sources not found (set OPENJDK8_SRC)"; exit 1; }
 OUT=$BUILD_ROOT/openjdk-natives
-CC="ppc-amigaos-gcc -mcrt=clib4 -fPIC -O2 -Wall -fcommon"
+CC="ppc-amigaos-gcc -mcrt=clib4 -fPIC -O2 -Wall -fcommon -gstabs"
 mkdir -p "$OUT"
 $CC -D__USE_BASETYPE__ \
     -I "$J/src/share/javavm/export" -I "$J/src/solaris/javavm/export" \
