@@ -29,9 +29,11 @@ endif
 ifeq ($(origin SDK_CLIB4), file)
 SDK_CLIB4 := $(SDK_BASE)/clib4
 endif
-BOOT_JDK ?= $(if $(wildcard $(CURDIR)/build/boot-jdk8/bin/javah),$(CURDIR)/build/boot-jdk8,$(JAVA_HOME))
 OPENJDK8_SRC ?= $(if $(wildcard $(CURDIR)/vendor/openjdk8/jdk/src),$(CURDIR)/vendor/openjdk8/jdk,$(firstword $(sort $(wildcard $(CURDIR)/build/openjdk8/jdk-*))))
 BOOT_JDK_URL ?= https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspot/normal/eclipse
+JAVAH_BIN := $(shell command -v javah 2>/dev/null)
+JAVAH_HOME := $(patsubst %/bin/javah,%,$(JAVAH_BIN))
+BOOT_JDK ?= $(if $(wildcard $(CURDIR)/build/boot-jdk8/bin/javah),$(CURDIR)/build/boot-jdk8,$(if $(JAVAH_HOME),$(JAVAH_HOME),$(JAVA_HOME)))
 
 SCRIPT_ENV = PROJECT_ROOT="$(CURDIR)" BUILD_ROOT="$(CURDIR)/build" BOOT_JDK="$(BOOT_JDK)" \
 	SDK_BASE="$(SDK_BASE)" SDK_CLIB4="$(SDK_CLIB4)" OPENJDK8_SRC="$(OPENJDK8_SRC)"
@@ -41,19 +43,24 @@ SCRIPT_ENV = PROJECT_ROOT="$(CURDIR)" BUILD_ROOT="$(CURDIR)/build" BOOT_JDK="$(B
 help:
 	@sed -n 's/^#   //p' Makefile.local
 
-check-local:
+check-local: boot-jdk
 	@command -v ppc-amigaos-gcc >/dev/null || { echo "Missing ppc-amigaos-gcc in PATH"; exit 1; }
 	@[ -n "$(SDK_BASE)" ] && [ -d "$(SDK_CLIB4)" ] || { echo "Missing AmigaOS SDK clib4 (set SDK_BASE or SDK_CLIB4)"; exit 1; }
-	@[ -n "$(BOOT_JDK)" ] && [ -x "$(BOOT_JDK)/bin/javac" ] || { echo "Missing BOOT_JDK (set it to a JDK 8 home)"; exit 1; }
-	@[ -x "$(BOOT_JDK)/bin/javah" ] || { echo "BOOT_JDK must be a JDK 8 with javah"; exit 1; }
+	@[ -n "$(BOOT_JDK)" ] && [ -x "$(BOOT_JDK)/bin/javac" ] || { echo "Missing BOOT_JDK (set it to a JDK 8 home, or run: make -f Makefile.local boot-jdk)"; exit 1; }
+	@[ -x "$(BOOT_JDK)/bin/javah" ] || { echo "BOOT_JDK must be a JDK 8 with javah (try: make -f Makefile.local boot-jdk)"; exit 1; }
 	@[ -n "$(OPENJDK8_SRC)" ] || { echo "Missing vendor/openjdk8/jdk source tree or build/openjdk8/jdk-* sources (or set OPENJDK8_SRC)"; exit 1; }
 
 boot-jdk:
-	rm -rf build/boot-jdk8 build/boot-jdk8.tar.gz
-	mkdir -p build/boot-jdk8
-	curl -fsSL -o build/boot-jdk8.tar.gz "$(BOOT_JDK_URL)"
-	tar -xzf build/boot-jdk8.tar.gz -C build/boot-jdk8 --strip-components=1
-	@echo "Boot JDK ready in $(CURDIR)/build/boot-jdk8"
+	@if [ -x "$(BOOT_JDK)/bin/javah" ]; then \
+		echo "Using existing BOOT_JDK: $(BOOT_JDK)"; \
+	else \
+		rm -rf build/boot-jdk8 build/boot-jdk8.tar.gz; \
+		mkdir -p build/boot-jdk8; \
+		curl -fsSL -o build/boot-jdk8.tar.gz "$(BOOT_JDK_URL)"; \
+		tar -xzf build/boot-jdk8.tar.gz -C build/boot-jdk8 --strip-components=1; \
+		[ -x "$(CURDIR)/build/boot-jdk8/bin/javah" ] || { echo "Downloaded Boot JDK does not provide javah"; exit 1; }; \
+		echo "Boot JDK ready in $(CURDIR)/build/boot-jdk8"; \
+	fi
 
 vendor:
 	sh tools/fetch-vendor.sh

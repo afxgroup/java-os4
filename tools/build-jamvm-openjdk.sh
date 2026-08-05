@@ -30,6 +30,18 @@ fi
 
 cd "$PROJECT_ROOT/vendor/jamvm/src"
 
+# Replicate configure's src/arch.h link for direct script-driven builds.
+if [ ! -f arch.h ]; then
+    cp -f arch/powerpc.h arch.h
+fi
+
+# Disable legacy JAmiga shim headers that shadow clib4/POSIX headers.
+for h in pthread signal sched stdlib time; do
+    if [ -f "os/amiga/$h.h" ] && [ ! -f "os/amiga/$h.h.jamiga-shim-bak" ]; then
+        mv "os/amiga/$h.h" "os/amiga/$h.h.jamiga-shim-bak"
+    fi
+done
+
 # Install the openjdk classlib headers as src/classlib*.h -- this is what
 # configure would symlink for the chosen classlib.  `-I .` resolves
 # #include "classlib.h" to src/ FIRST, so these MUST match the classlib we build;
@@ -78,7 +90,6 @@ done
 
 echo "=== os/amiga (clib4: os.c + arch only) ==="
 compile os/amiga/os.c             os_os
-compile os/amiga/real_amiga_exit.c os_real_amiga_exit
 compile os/amiga/powerpc/dll_md.c ppc_dll_md
 compile os/amiga/powerpc/init.c   ppc_init
 ppc-amigaos-gcc $CFLAGS -c os/amiga/powerpc/callNative.S -o "$OUT/ppc_callNative.o"

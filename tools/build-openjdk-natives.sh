@@ -187,6 +187,20 @@ if [ -f "$UFS" ] && ! grep -q "amiga_path" "$UFS"; then
     echo "=== adapted UnixFileSystem_md.c (amiga_path/amiga_canonicalize) ==="
 fi
 
+# UnixFileSystem_md.c getLastModifiedTime(): clib4 struct stat uses st_mtime
+# (no st_mtim/st_mtimespec). Use seconds precision on amiga.
+if [ -f "$UFS" ] && ! grep -q "amiga st_mtime" "$UFS"; then
+    perl -0pi -e 's@#ifndef MACOSX\n\s*rv\s*=\s*\(jlong\)sb\.st_mtim\.tv_sec \* 1000;\n\s*rv \+= \(jlong\)sb\.st_mtim\.tv_nsec / 1000000;\n\s*#else\n\s*rv\s*=\s*\(jlong\)sb\.st_mtimespec\.tv_sec \* 1000;\n\s*rv \+= \(jlong\)sb\.st_mtimespec\.tv_nsec / 1000000;\n\s*#endif@#if defined(__amigaos4__)\n            /* amiga st_mtime */\n            rv = (jlong)sb.st_mtime * 1000;\n#elif !defined(MACOSX)\n            rv  = (jlong)sb.st_mtim.tv_sec * 1000;\n            rv += (jlong)sb.st_mtim.tv_nsec / 1000000;\n#else\n            rv  = (jlong)sb.st_mtimespec.tv_sec * 1000;\n            rv += (jlong)sb.st_mtimespec.tv_nsec / 1000000;\n#endif@s' "$UFS"
+    echo "=== adapted UnixFileSystem_md.c (amiga st_mtime) ==="
+fi
+
+# UnixFileSystem_md.c setLastModifiedTime(): clib4 struct stat uses st_atime
+# (no st_atim/st_atimespec). Preserve access time with seconds precision.
+if [ -f "$UFS" ] && ! grep -q "amiga st_atime" "$UFS"; then
+    perl -0pi -e 's@#ifndef MACOSX\n\s*tv\[0\]\.tv_sec = sb\.st_atim\.tv_sec;\n\s*tv\[0\]\.tv_usec = sb\.st_atim\.tv_nsec / 1000;\n\s*#else\n\s*tv\[0\]\.tv_sec = sb\.st_atimespec\.tv_sec;\n\s*tv\[0\]\.tv_usec = sb\.st_atimespec\.tv_nsec / 1000;\n\s*#endif@#if defined(__amigaos4__)\n            /* amiga st_atime */\n            tv[0].tv_sec = sb.st_atime;\n            tv[0].tv_usec = 0;\n#elif !defined(MACOSX)\n            tv[0].tv_sec = sb.st_atim.tv_sec;\n            tv[0].tv_usec = sb.st_atim.tv_nsec / 1000;\n#else\n            tv[0].tv_sec = sb.st_atimespec.tv_sec;\n            tv[0].tv_usec = sb.st_atimespec.tv_nsec / 1000;\n#endif@s' "$UFS"
+    echo "=== adapted UnixFileSystem_md.c (amiga st_atime) ==="
+fi
+
 # zip_util.c ZFILE_Open + io_util_md.c handleOpen: normalise Amiga "/Volume:"/"./" paths
 # before the actual open() (so URLClassPath can open jars from the canonicalised
 # leading-"/" path, and FileInputStream/Output work on them too).
@@ -654,17 +668,6 @@ initInetAddressIDs(JNIEnv *env) {
         Java_java_net_Inet6Address_init(env, 0);
         initialized = 1;
     }
-}
-
-/* InetAddressImplFactory.isIPv6Supported() is called during InetAddress clinit
- * (and transitively by IOUtil/FileChannelImpl clinit).  AmigaOS 4/clib4 has no
- * IPv6 dual-stack support in this build, so report false to let initialization
- * complete without UnsatisfiedLinkError. */
-JNIEXPORT jboolean JNICALL
-Java_java_net_InetAddressImplFactory_isIPv6Supported(JNIEnv *env, jclass cls) {
-    (void)env;
-    (void)cls;
-    return JNI_FALSE;
 }
 IEOF
 if $CC -D_GNU_SOURCE $NIOINC -c "$OUT/libnio/inetaddress_compat.c" -o "$OUT/libnio/inetaddress_compat.o" 2>"$OUT/e"; then

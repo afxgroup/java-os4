@@ -12,16 +12,34 @@
 # Needs: git + network (runs on the host, not in the build container).
 set -e
 cd "$(dirname "$0")/.."                 # repo root
+PATCH_FILE="$(pwd)/docs/jamvm-amiga-openjdk.patch"
+
+apply_jamvm_patch_if_needed() {
+    if git -C vendor/jamvm apply --check "$PATCH_FILE" >/dev/null 2>&1; then
+        echo "=== applying docs/jamvm-amiga-openjdk.patch (our AmigaOS4 + OpenJDK 8 changes) ==="
+        git -C vendor/jamvm apply "$PATCH_FILE"
+        echo "    patch applied to vendor/jamvm working tree"
+    elif git -C vendor/jamvm apply --reverse --check "$PATCH_FILE" >/dev/null 2>&1; then
+        echo "=== docs/jamvm-amiga-openjdk.patch already applied -- skipping ==="
+    else
+        echo "WARNING: docs/jamvm-amiga-openjdk.patch does not apply cleanly to this jamvm checkout."
+        echo "         Continuing with vendor/jamvm as-is."
+        echo "         If VM build fails later, reset vendor/jamvm to the expected upstream revision and rerun make vendor."
+    fi
+}
 
 # --- JamVM (the engine): jaokim's JAmiga fork + our AmigaOS4 / OpenJDK 8 work --
 if [ -d vendor/jamvm/.git ]; then
-    echo "=== vendor/jamvm already present -- skipping ==="
+    echo "=== vendor/jamvm already present ==="
+    apply_jamvm_patch_if_needed
+elif [ -d vendor/jamvm ]; then
+    echo "ERROR: vendor/jamvm exists but is not a git repository."
+    echo "       Remove vendor/jamvm and rerun make vendor."
+    exit 1
 else
     echo "=== cloning jamiga-jamvm -> vendor/jamvm ==="
     git clone https://github.com/jaokim/jamiga-jamvm vendor/jamvm
-    echo "=== applying docs/jamvm-amiga-openjdk.patch (our AmigaOS4 + OpenJDK 8 changes) ==="
-    git -C vendor/jamvm am --3way < docs/jamvm-amiga-openjdk.patch
-    echo "    vendor/jamvm now at: $(git -C vendor/jamvm log --oneline -1)"
+    apply_jamvm_patch_if_needed
 fi
 
 # --- IcedTea 8 harness: produces the OpenJDK 8 source the natives compile from --

@@ -26,6 +26,18 @@ fi
 
 cd /work/vendor/jamvm/src
 
+# Replicate configure's src/arch.h link for direct script-driven builds.
+if [ ! -f arch.h ]; then
+    cp -f arch/powerpc.h arch.h
+fi
+
+# Disable legacy JAmiga shim headers that shadow clib4/POSIX headers.
+for h in pthread signal sched stdlib time; do
+    if [ -f "os/amiga/$h.h" ] && [ ! -f "os/amiga/$h.h.jamiga-shim-bak" ]; then
+        mv "os/amiga/$h.h" "os/amiga/$h.h.jamiga-shim-bak"
+    fi
+done
+
 # Install the gnuclasspath classlib headers as src/classlib*.h (what configure
 # would symlink).  Needed so switching between this and the openjdk build (which
 # installs its own) leaves src/ consistent -- `-I .` finds src/classlib*.h first.
