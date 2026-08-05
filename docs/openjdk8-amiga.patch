@@ -50,7 +50,7 @@ index c13bb7794e..d52a811a89 100644
  #include <math.h>
  #define ISNANF(f) _isnanf(f)
 diff --git a/jdk/src/solaris/native/java/io/UnixFileSystem_md.c b/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
-index 225e23f8dd..5fc2ab97d6 100644
+index 225e23f8dd..716576f0eb 100644
 --- a/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
 +++ b/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
 @@ -42,7 +42,7 @@
@@ -108,9 +108,9 @@ index 225e23f8dd..5fc2ab97d6 100644
 -        if (stat64(path, &sb) == 0) {
 -#ifndef MACOSX
 +        if (stat64(amiga_path(path), &sb) == 0) {
-+#ifdef __amigaos4__
-+            /* amiga st_mtime fallback */
-+            rv  = (jlong)sb.st_mtime * 1000;
++#if defined(__amigaos4__)
++            /* amiga st_mtime */
++            rv = (jlong)sb.st_mtime * 1000;
 +#elif !defined(MACOSX)
              rv  = (jlong)sb.st_mtim.tv_sec * 1000;
              rv += (jlong)sb.st_mtim.tv_nsec / 1000000;
@@ -134,8 +134,8 @@ index 225e23f8dd..5fc2ab97d6 100644
  
              /* Preserve access time */
 -#ifndef MACOSX
-+#ifdef __amigaos4__
-+            /* amiga st_atime fallback */
++#if defined(__amigaos4__)
++            /* amiga st_atime */
 +            tv[0].tv_sec = sb.st_atime;
 +            tv[0].tv_usec = 0;
 +#elif !defined(MACOSX)
