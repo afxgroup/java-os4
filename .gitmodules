@@ -2,6 +2,7 @@
 	path = clib4
 	url = https://github.com/AmigaLabs/clib4.git
 	branch = development
+	ignore = all
 [submodule "vendor/openjdk8"]
 	path = vendor/openjdk8
 	url = https://github.com/AdoptOpenJDK/openjdk-jdk8u.git
