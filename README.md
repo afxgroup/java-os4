@@ -103,7 +103,7 @@ The toolchain runs in a Docker image — the AmigaOS 4 PowerPC cross compiler pl
 a host JDK 8 — driven by the `Makefile`:
 
 ```sh
-git submodule update --init     # check out the clib4/ submodule (or clone --recursive)
+git submodule update --init clib4 vendor/openjdk8
 make vendor                     # fetch the JamVM + IcedTea 8 upstream sources, once
 make image                      # build the cross-build image (pulls the public
                                 #   walkero/amigagccondocker base), once
@@ -114,9 +114,10 @@ make dist                       # assemble the install tree + the .lha release
 
 `make release` does `build` then `dist` in one step; `make help` lists every
 target. The clib4 C runtime is the in-repo **`clib4/` git submodule**
-(`AmigaLabs/clib4`, `development`), built by `make clib4` automatically. The
-larger JamVM + OpenJDK 8 (IcedTea) upstream trees are public but not committed
-here — `make vendor` fetches them (see
+(`AmigaLabs/clib4`, `development`), built by `make clib4` automatically.
+OpenJDK 8's native-source tree is tracked as the **`vendor/openjdk8`** git
+submodule, pinned to the source level the native build scripts expect.
+`make vendor` still fetches the JamVM and IcedTea upstream trees (see
 [docs/BUILDING.md](docs/BUILDING.md) for the full source-acquisition flow). No
 external paths are needed.
 

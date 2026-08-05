@@ -20,16 +20,18 @@
 # installer adds to S:User-Startup).
 set -e
 
-VER=$(cat /work/VERSION 2>/dev/null || echo "0.0.0")
+. "$(dirname "$0")/build-env.sh"
+
+VER=$(cat "$PROJECT_ROOT/VERSION" 2>/dev/null || echo "0.0.0")
 PVER=$(echo "$VER" | cut -d. -f1,2)          # 0.5.0 -> 0.5 (clean major.minor)
 DATE=$(date +%d.%m.%Y)
 # Official Java version the runtime is built on (the class-library JDK).
-JVER=$(sed -n 's/^JAVA_VERSION="\(.*\)"$/\1/p' /opt/jdk8/release 2>/dev/null)
+JVER=$(sed -n 's/^JAVA_VERSION="\(.*\)"$/\1/p' "$BOOT_JDK/release" 2>/dev/null)
 [ -n "$JVER" ] || JVER="1.8.0"
-JDK8=/opt/jdk8
-B=/work/build
+JDK8=$BOOT_JDK
+B=$BUILD_ROOT
 N="$B/openjdk-natives"
-SRC=/work/src/installer
+SRC=$PROJECT_ROOT/src/installer
 OUT="$B/release"
 R="$OUT/Java-OS4"          # distribution drawer
 RT="$R/content/Java"       # runtime payload (installed into the chosen drawer)
@@ -66,9 +68,31 @@ done
 # clib4's .so front-ends come straight from the in-repo clib4/ submodule build,
 # in lockstep with clib4.library below.  libz (zlib) and libgcc (gcc runtime)
 # are third-party / toolchain sobjs, NOT clib4 -- they stay in build/sobjs.
-cp /work/clib4/build/lib/libc.so /work/clib4/build/lib/libpthread.so \
-   /work/clib4/build/lib/libm.so /work/clib4/build/lib/librt.so "$RT/"
-cp "$B/sobjs/"libz.so.1 "$B/sobjs/"libgcc.so "$RT/"
+if [ -n "${CLIB4_BUILD_ROOT:-}" ] && [ -f "$CLIB4_BUILD_ROOT/build/clib4.library" ]; then
+    CLIB4_SO_DIR=$CLIB4_BUILD_ROOT/build/lib
+    CLIB4_LIBRARY_FILE=$CLIB4_BUILD_ROOT/build/clib4.library
+else
+    CLIB4_SO_DIR=$SDK_CLIB4/lib
+    CLIB4_LIBRARY_FILE=$SDK_CLIB4/clib4.library
+fi
+
+if [ -f "$B/sobjs/libz.so.1" ]; then
+    LIBZ_SO_FILE=$B/sobjs/libz.so.1
+else
+    LIBZ_SO_FILE=$(find "$SDK_LOCAL_CLIB4_LIB" -maxdepth 1 -type f \( -name 'libz.so.1' -o -name 'libz.so.1.*' \) | sort | head -n 1)
+fi
+if [ -f "$B/sobjs/libgcc.so" ]; then
+    LIBGCC_SO_FILE=$B/sobjs/libgcc.so
+else
+    LIBGCC_SO_FILE=$(ppc-amigaos-gcc -mcrt=clib4 -print-file-name=libgcc.so 2>/dev/null)
+fi
+
+cp "$CLIB4_SO_DIR/libc.so" "$CLIB4_SO_DIR/libpthread.so" \
+    "$CLIB4_SO_DIR/libm.so" "$CLIB4_SO_DIR/librt.so" "$RT/"
+[ -n "$LIBZ_SO_FILE" ] && [ -f "$LIBZ_SO_FILE" ] || { echo "Missing libz.so.1 for packaging"; exit 1; }
+[ -n "$LIBGCC_SO_FILE" ] && [ -f "$LIBGCC_SO_FILE" ] || { echo "Missing libgcc.so for packaging"; exit 1; }
+cp "$LIBZ_SO_FILE" "$RT/libz.so.1"
+cp "$LIBGCC_SO_FILE" "$RT/"
 
 # --- runtime: clib4.library (the C runtime the VM + .so stubs call into) ---
 # The bundled .so stubs (libc.so, ...) are clib4.library front-ends; the real
@@ -78,11 +102,11 @@ cp "$B/sobjs/"libz.so.1 "$B/sobjs/"libgcc.so "$RT/"
 # blocked installs in 0.5.0).  Built from the clib4/ submodule (AmigaLabs/clib4
 # `development`, incl. the AltiVec vec_strcpy page-overread fix #438), in
 # lockstep with the .so front-ends above.  clib4 2.1+.
-cp /work/clib4/build/clib4.library "$RT/"
+cp "$CLIB4_LIBRARY_FILE" "$RT/"
 
 # --- runtime: class library + toolkit -------------------------------------
-cp "$B/jars/"rt.jar "$B/jars/"charsets.jar "$B/jars/"jce.jar \
-   "$B/jars/"jsse.jar "$B/jars/"resources.jar "$RT/"
+cp "$JDK8/jre/lib/rt.jar" "$JDK8/jre/lib/charsets.jar" "$JDK8/jre/lib/jce.jar" \
+    "$JDK8/jre/lib/jsse.jar" "$JDK8/jre/lib/resources.jar" "$RT/"
 cp "$N/niopatch.zip"     "$RT/"
 cp "$B/amigatoolkit.zip" "$RT/"
 
@@ -91,10 +115,11 @@ cp "$B/amigatoolkit.zip" "$RT/"
 # Swing demo, and the self-verifying VM test suite.
 mkdir -p "$RT/examples"
 cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar "$RT/examples/"
+[ -f "$B/examples/"awttest.jar ] && cp "$B/examples/"awttest.jar "$RT/examples/"
 cp "$B/testsuite.zip" "$RT/examples/"
 
 # --- runtime: lib/ resources (read from java.home/lib) --------------------
-cp /work/src/fontconfig/fontconfig.properties "$RT/lib/"
+cp "$PROJECT_ROOT/src/fontconfig/fontconfig.properties" "$RT/lib/"
 cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
    /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf "$RT/lib/fonts/"
 for p in currency.data tzdb.dat calendars.properties content-types.properties \

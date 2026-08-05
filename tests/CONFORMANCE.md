@@ -60,6 +60,6 @@ on the VM.
 # host reference check (all 25 green):
 docker run --rm -v "<proj>:/work" -w /work javaos4-build:latest sh /work/tools/run-regression.sh
 
-# on the VM (deploy build/suite8.jar to SYS:Test, CWD=SYS:Test):
+# on the VM (deploy build/suite8.jar to JAVA:Sobjs, CWD=JAVA:Sobjs):
 jamvm-openjdk -cp suite8.jar java8.java.util.stream.StreamTest   # one test
 ```

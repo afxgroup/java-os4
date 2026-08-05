@@ -1,0 +1,679 @@
+diff --git a/jdk/src/share/native/java/util/zip/ZipFile.c b/jdk/src/share/native/java/util/zip/ZipFile.c
+index 8e857c1636..1d84641289 100644
+--- a/jdk/src/share/native/java/util/zip/ZipFile.c
++++ b/jdk/src/share/native/java/util/zip/ZipFile.c
+@@ -155,7 +155,7 @@ Java_java_util_zip_ZipFile_close(JNIEnv *env, jclass cls, jlong zfile)
+ 
+ JNIEXPORT jlong JNICALL
+ Java_java_util_zip_ZipFile_getEntry(JNIEnv *env, jclass cls, jlong zfile,
+-                                    jbyteArray name, jboolean addSlash)
++                                    jbyteArray name)
+ {
+ #define MAXNAME 1024
+     jzfile *zip = jlong_to_ptr(zfile);
+@@ -174,7 +174,7 @@ Java_java_util_zip_ZipFile_getEntry(JNIEnv *env, jclass cls, jlong zfile,
+     }
+     (*env)->GetByteArrayRegion(env, name, 0, ulen, (jbyte *)path);
+     path[ulen] = '\0';
+-    ze = ZIP_GetEntry2(zip, path, (jint)ulen, addSlash);
++    ze = ZIP_GetEntry2(zip, path, (jint)ulen, JNI_FALSE);
+     if (path != buf) {
+         free(path);
+     }
+diff --git a/jdk/src/share/native/java/util/zip/zip_util.c b/jdk/src/share/native/java/util/zip/zip_util.c
+index 3245dea506..72297b0c25 100644
+--- a/jdk/src/share/native/java/util/zip/zip_util.c
++++ b/jdk/src/share/native/java/util/zip/zip_util.c
+@@ -92,6 +92,9 @@ static jint INITIAL_META_COUNT = 2;   /* initial number of entries in meta name
+  */
+ static ZFILE
+ ZFILE_Open(const char *fname, int flags) {
++#ifdef __amigaos4__
++    fname = amiga_path(fname);
++#endif
+ #ifdef WIN32
+     const DWORD access =
+         (flags & O_RDWR)   ? (GENERIC_WRITE | GENERIC_READ) :
+diff --git a/jdk/src/solaris/native/common/jdk_util_md.h b/jdk/src/solaris/native/common/jdk_util_md.h
+index c13bb7794e..d52a811a89 100644
+--- a/jdk/src/solaris/native/common/jdk_util_md.h
++++ b/jdk/src/solaris/native/common/jdk_util_md.h
+@@ -39,6 +39,10 @@
+ #include <math.h>
+ #define ISNANF(f) isnanf(f)
+ #define ISNAND(d) isnan(d)
++#elif defined(__amigaos4__)
++#include <math.h>
++#define ISNANF(f) isnan(f)
++#define ISNAND(d) isnan(d)
+ #elif defined(_AIX)
+ #include <math.h>
+ #define ISNANF(f) _isnanf(f)
+diff --git a/jdk/src/solaris/native/java/io/UnixFileSystem_md.c b/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
+index 225e23f8dd..5fc2ab97d6 100644
+--- a/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
++++ b/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
+@@ -42,7 +42,7 @@
+ #include "java_io_FileSystem.h"
+ #include "java_io_UnixFileSystem.h"
+ 
+-#if defined(_ALLBSD_SOURCE)
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+ #define dirent64 dirent
+ #define readdir64_r readdir_r
+ #define stat64 stat
+@@ -77,7 +77,7 @@ Java_java_io_UnixFileSystem_canonicalize0(JNIEnv *env, jobject this,
+ 
+     WITH_PLATFORM_STRING(env, pathname, path) {
+         char canonicalPath[JVM_MAXPATHLEN];
+-        if (canonicalize((char *)path,
++        if (amiga_canonicalize((char *)path,
+                          canonicalPath, JVM_MAXPATHLEN) < 0) {
+             JNU_ThrowIOExceptionWithLastError(env, "Bad pathname");
+         } else {
+@@ -99,7 +99,10 @@ static jboolean
+ statMode(const char *path, int *mode)
+ {
+     struct stat64 sb;
+-    if (stat64(path, &sb) == 0) {
++#ifdef __amigaos4__
++    path = amiga_path(path);
++#endif
++    if (stat64(amiga_path(path), &sb) == 0) {
+         *mode = sb.st_mode;
+         return JNI_TRUE;
+     }
+@@ -144,7 +147,7 @@ Java_java_io_UnixFileSystem_checkAccess(JNIEnv *env, jobject this,
+     default: assert(0);
+     }
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+-        if (access(path, mode) == 0) {
++        if (access(amiga_path(path), mode) == 0) {
+             rv = JNI_TRUE;
+         }
+     } END_PLATFORM_STRING(env, path);
+@@ -191,7 +194,7 @@ Java_java_io_UnixFileSystem_setPermission(JNIEnv *env, jobject this,
+                 mode |= amode;
+             else
+                 mode &= ~amode;
+-            if (chmod(path, mode) >= 0) {
++            if (chmod(amiga_path(path), mode) >= 0) {
+                 rv = JNI_TRUE;
+             }
+         }
+@@ -207,8 +210,11 @@ Java_java_io_UnixFileSystem_getLastModifiedTime(JNIEnv *env, jobject this,
+ 
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+         struct stat64 sb;
+-        if (stat64(path, &sb) == 0) {
+-#ifndef MACOSX
++        if (stat64(amiga_path(path), &sb) == 0) {
++#ifdef __amigaos4__
++            /* amiga st_mtime fallback */
++            rv  = (jlong)sb.st_mtime * 1000;
++#elif !defined(MACOSX)
+             rv  = (jlong)sb.st_mtim.tv_sec * 1000;
+             rv += (jlong)sb.st_mtim.tv_nsec / 1000000;
+ #else
+@@ -229,7 +235,7 @@ Java_java_io_UnixFileSystem_getLength(JNIEnv *env, jobject this,
+ 
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+         struct stat64 sb;
+-        if (stat64(path, &sb) == 0) {
++        if (stat64(amiga_path(path), &sb) == 0) {
+             rv = sb.st_size;
+         }
+     } END_PLATFORM_STRING(env, path);
+@@ -394,11 +400,15 @@ Java_java_io_UnixFileSystem_setLastModifiedTime(JNIEnv *env, jobject this,
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+         struct stat64 sb;
+ 
+-        if (stat64(path, &sb) == 0) {
++        if (stat64(amiga_path(path), &sb) == 0) {
+             struct timeval tv[2];
+ 
+             /* Preserve access time */
+-#ifndef MACOSX
++#ifdef __amigaos4__
++            /* amiga st_atime fallback */
++            tv[0].tv_sec = sb.st_atime;
++            tv[0].tv_usec = 0;
++#elif !defined(MACOSX)
+             tv[0].tv_sec = sb.st_atim.tv_sec;
+             tv[0].tv_usec = sb.st_atim.tv_nsec / 1000;
+ #else
+diff --git a/jdk/src/solaris/native/java/io/io_util_md.c b/jdk/src/solaris/native/java/io/io_util_md.c
+index 0dee96b890..ee055df920 100644
+--- a/jdk/src/solaris/native/java/io/io_util_md.c
++++ b/jdk/src/solaris/native/java/io/io_util_md.c
+@@ -35,11 +35,11 @@
+ #include <string.h>
+ #include <unistd.h>
+ 
+-#ifdef __solaris__
++#if defined(__solaris__) || defined(__amigaos4__)
+ #include <sys/filio.h>
+ #endif
+ 
+-#if defined(__linux__) || defined(_ALLBSD_SOURCE) || defined(_AIX)
++#if defined(__linux__) || (defined(_ALLBSD_SOURCE) || defined(__amigaos4__)) || defined(_AIX)
+ #include <sys/ioctl.h>
+ #endif
+ 
+@@ -78,7 +78,7 @@ jstring newStringPlatform(JNIEnv *env, const char* str)
+ FD
+ handleOpen(const char *path, int oflag, int mode) {
+     FD fd;
+-    RESTARTABLE(open64(path, oflag, mode), fd);
++    RESTARTABLE(open64(amiga_path(path), oflag, mode), fd);
+     if (fd != -1) {
+         struct stat64 buf64;
+         int result;
+@@ -103,7 +103,7 @@ fileOpen(JNIEnv *env, jobject this, jstring path, jfieldID fid, int flags)
+     WITH_PLATFORM_STRING(env, path, ps) {
+         FD fd;
+ 
+-#if defined(__linux__) || defined(_ALLBSD_SOURCE)
++#if defined(__linux__) || (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+         /* Remove trailing slashes, since the kernel won't */
+         char *p = (char *)ps + strlen(ps) - 1;
+         while ((p > ps) && (*p == '/'))
+diff --git a/jdk/src/solaris/native/java/io/io_util_md.h b/jdk/src/solaris/native/java/io/io_util_md.h
+index b7b2573a02..c28d923e01 100644
+--- a/jdk/src/solaris/native/java/io/io_util_md.h
++++ b/jdk/src/solaris/native/java/io/io_util_md.h
+@@ -73,7 +73,7 @@ FD handleOpen(const char *path, int oflag, int mode);
+ #define IO_Available handleAvailable
+ #define IO_SetLength handleSetLength
+ 
+-#ifdef _ALLBSD_SOURCE
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__)) || defined(__amigaos4__)
+ #define open64 open
+ #define fstat64 fstat
+ #define stat64 stat
+diff --git a/jdk/src/solaris/native/java/lang/childproc.c b/jdk/src/solaris/native/java/lang/childproc.c
+index c0045d5371..e058e54c56 100644
+--- a/jdk/src/solaris/native/java/lang/childproc.c
++++ b/jdk/src/solaris/native/java/lang/childproc.c
+@@ -63,7 +63,7 @@ isAsciiDigit(char c)
+   return c >= '0' && c <= '9';
+ }
+ 
+-#ifdef _ALLBSD_SOURCE
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__)) || defined(__amigaos4__)
+ #define FD_DIR "/dev/fd"
+ #define dirent64 dirent
+ #define readdir64 readdir
+diff --git a/jdk/src/solaris/native/java/lang/java_props_md.c b/jdk/src/solaris/native/java/lang/java_props_md.c
+index b03bd6ac8f..5432194c22 100644
+--- a/jdk/src/solaris/native/java/lang/java_props_md.c
++++ b/jdk/src/solaris/native/java/lang/java_props_md.c
+@@ -290,6 +290,12 @@ static int ParseLocale(JNIEnv* env, int cat, char ** std_language, char ** std_s
+         /* return same result nl_langinfo would return for en_UK,
+          * in order to use optimizations. */
+         *std_encoding = (*p != '\0') ? p : "ISO8859-1";
++#ifdef __amigaos4__
++        /* AmigaOS diskfont reports a vendor charset name (e.g. "Amiga-1251")
++         * the JDK cannot resolve -> NoClassDefFoundError at bootstrap; map it
++         * to a standard-provider charset name (see src/openjdk/amiga_charset.h). */
++        *std_encoding = (char *) amiga_normalize_encoding(*std_encoding);
++#endif
+ 
+ #ifdef __linux__
+         /*
+diff --git a/jdk/src/solaris/native/java/util/FileSystemPreferences.c b/jdk/src/solaris/native/java/util/FileSystemPreferences.c
+index 757f64c34f..38448cec73 100644
+--- a/jdk/src/solaris/native/java/util/FileSystemPreferences.c
++++ b/jdk/src/solaris/native/java/util/FileSystemPreferences.c
+@@ -49,7 +49,7 @@ Java_java_util_prefs_FileSystemPreferences_chmod(JNIEnv *env,
+     return (jint) result;
+ }
+ 
+-#if defined(_ALLBSD_SOURCE)
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+ typedef struct flock FLOCK;
+ #else
+ typedef struct flock64 FLOCK;
+@@ -94,7 +94,7 @@ Java_java_util_prefs_FileSystemPreferences_lockFile0(JNIEnv *env,
+     if (fd < 0) {
+         result[0] = 0;
+     } else {
+-#if defined(_ALLBSD_SOURCE)
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+         rc = fcntl(fd, F_SETLK, &fl);
+ #else
+         rc = fcntl(fd, F_SETLK64, &fl);
+@@ -129,7 +129,7 @@ Java_java_util_prefs_FileSystemPreferences_unlockFile0(JNIEnv *env,
+     fl.l_start = 0;
+     fl.l_type = F_UNLCK;
+ 
+-#if defined(_ALLBSD_SOURCE)
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+     rc = fcntl(fd, F_SETLK, &fl);
+ #else
+     rc = fcntl(fd, F_SETLK64, &fl);
+diff --git a/jdk/src/solaris/native/java/util/TimeZone_md.c b/jdk/src/solaris/native/java/util/TimeZone_md.c
+index 990e4afb22..da35cbfd1d 100644
+--- a/jdk/src/solaris/native/java/util/TimeZone_md.c
++++ b/jdk/src/solaris/native/java/util/TimeZone_md.c
+@@ -46,7 +46,7 @@ static char *isFileIdentical(char* buf, size_t size, char *pathname);
+ 
+ #define SKIP_SPACE(p)   while (*p == ' ' || *p == '\t') p++;
+ 
+-#if defined(_ALLBSD_SOURCE)
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+ #define dirent64 dirent
+ #define readdir64_r readdir_r
+ #endif
+@@ -57,7 +57,7 @@ static char *isFileIdentical(char* buf, size_t size, char *pathname);
+ #define fileclose       fclose
+ #endif
+ 
+-#if defined(__linux__) || defined(_ALLBSD_SOURCE)
++#if defined(__linux__) || (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+ static const char *ETC_TIMEZONE_FILE = "/etc/timezone";
+ static const char *ZONEINFO_DIR = "/usr/share/zoneinfo";
+ static const char *DEFAULT_ZONEINFO_FILE = "/etc/localtime";
+@@ -65,7 +65,7 @@ static const char *DEFAULT_ZONEINFO_FILE = "/etc/localtime";
+ static const char *SYS_INIT_FILE = "/etc/default/init";
+ static const char *ZONEINFO_DIR = "/usr/share/lib/zoneinfo";
+ static const char *DEFAULT_ZONEINFO_FILE = "/usr/share/lib/zoneinfo/localtime";
+-#endif /* defined(__linux__) || defined(_ALLBSD_SOURCE) */
++#endif /* defined(__linux__) || (defined(_ALLBSD_SOURCE) || defined(__amigaos4__)) */
+ 
+ static const char popularZones[][4] = {"UTC", "GMT"};
+ 
+@@ -73,7 +73,7 @@ static const char popularZones[][4] = {"UTC", "GMT"};
+ static const char *ETC_ENVIRONMENT_FILE = "/etc/environment";
+ #endif
+ 
+-#if defined(__linux__) || defined(MACOSX) || defined(__solaris__)
++#if defined(__linux__) || defined(MACOSX) || defined(__solaris__) || defined(__amigaos4__)
+ 
+ /*
+  * Returns a pointer to the zone ID portion of the given zoneinfo file
+@@ -251,7 +251,7 @@ isFileIdentical(char *buf, size_t size, char *pathname)
+     return possibleMatch;
+ }
+ 
+-#if defined(__linux__) || defined(MACOSX)
++#if defined(__linux__) || defined(MACOSX) || defined(__amigaos4__)
+ 
+ /*
+  * Performs Linux specific mapping and returns a zone ID
+@@ -851,7 +851,7 @@ findJavaTZ_md(const char *java_home_dir)
+  * Returns a GMT-offset-based zone ID. (e.g., "GMT-08:00")
+  */
+ 
+-#if defined(MACOSX)
++#if defined(MACOSX) || defined(__amigaos4__)
+ 
+ char *
+ getGMTOffsetID()
+diff --git a/jdk/src/solaris/native/sun/awt/utility/rect.h b/jdk/src/solaris/native/sun/awt/utility/rect.h
+index ceea38f434..df68954919 100644
+--- a/jdk/src/solaris/native/sun/awt/utility/rect.h
++++ b/jdk/src/solaris/native/sun/awt/utility/rect.h
+@@ -28,7 +28,7 @@
+ #ifndef _AWT_RECT_H
+ #define _AWT_RECT_H
+ 
+-#ifndef MACOSX
++#if !defined(MACOSX) && !defined(__amigaos4__)
+ #include <X11/Xlib.h>
+ typedef XRectangle RECT_T;
+ #else
+diff --git a/jdk/src/solaris/native/sun/nio/ch/FileChannelImpl.c b/jdk/src/solaris/native/sun/nio/ch/FileChannelImpl.c
+index dc34e1a941..176425d78d 100644
+--- a/jdk/src/solaris/native/sun/nio/ch/FileChannelImpl.c
++++ b/jdk/src/solaris/native/sun/nio/ch/FileChannelImpl.c
+@@ -33,7 +33,7 @@
+ #include <sys/sendfile.h>
+ #elif defined(_AIX)
+ #include <sys/socket.h>
+-#elif defined(_ALLBSD_SOURCE)
++#elif (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+ #include <sys/socket.h>
+ #include <sys/uio.h>
+ 
+diff --git a/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c b/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c
+index 9b3ff8194e..c6eab08e6a 100644
+--- a/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c
++++ b/jdk/src/solaris/native/sun/nio/ch/FileDispatcherImpl.c
+@@ -38,7 +38,7 @@
+ #include <sys/ioctl.h>
+ #endif
+ 
+-#if defined(_ALLBSD_SOURCE)
++#if (defined(_ALLBSD_SOURCE) || defined(__amigaos4__))
+ #define lseek64 lseek
+ #define stat64 stat
+ #define flock64 flock
+diff --git a/jdk/src/solaris/native/sun/nio/ch/NativeThread.c b/jdk/src/solaris/native/sun/nio/ch/NativeThread.c
+index 5e2a78b7af..b75f426b9c 100644
+--- a/jdk/src/solaris/native/sun/nio/ch/NativeThread.c
++++ b/jdk/src/solaris/native/sun/nio/ch/NativeThread.c
+@@ -32,7 +32,7 @@
+ #include "sun_nio_ch_NativeThread.h"
+ #include "nio_util.h"
+ 
+-#ifdef __linux__
++#if defined(__linux__) && !defined(__amigaos4__)
+   #include <pthread.h>
+   #include <sys/signal.h>
+   /* Also defined in net/linux_close.c */
+@@ -47,7 +47,9 @@
+   /* Also defined in net/bsd_close.c */
+   #define INTERRUPT_SIGNAL SIGIO
+ #else
+-  #error "missing platform-specific definition here"
++  #include <pthread.h>
++  #include <signal.h>
++  #define INTERRUPT_SIGNAL SIGUSR2  /* amiga: benign; not async */
+ #endif
+ 
+ static void
+diff --git a/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c b/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c
+index cb4cfc0190..923b36264b 100644
+--- a/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c
++++ b/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c
+@@ -46,7 +46,7 @@
+ #include <string.h>
+ #endif
+ 
+-#ifdef _ALLBSD_SOURCE
++#if defined(_ALLBSD_SOURCE) || defined(__amigaos4__)
+ #include <string.h>
+ 
+ #define stat64 stat
+@@ -261,7 +261,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_init(JNIEnv* env, jclass this)
+ 
+     /* supports futimes or futimesat */
+ 
+-#ifdef _ALLBSD_SOURCE
++#if defined(_ALLBSD_SOURCE) || defined(__amigaos4__)
+     capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_FUTIMES;
+ #else
+     if (my_futimesat_func != NULL)
+@@ -338,8 +338,8 @@ Java_sun_nio_fs_UnixNativeDispatcher_fopen0(JNIEnv* env, jclass this,
+     jlong pathAddress, jlong modeAddress)
+ {
+     FILE* fp = NULL;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
+-    const char* mode = (const char*)jlong_to_ptr(modeAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
++    const char* mode = amiga_path((const char*)jlong_to_ptr(modeAddress));
+ 
+     do {
+         fp = fopen(path, mode);
+@@ -386,9 +386,9 @@ Java_sun_nio_fs_UnixNativeDispatcher_open0(JNIEnv* env, jclass this,
+     jlong pathAddress, jint oflags, jint mode)
+ {
+     jint fd;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+-    RESTARTABLE(open64(path, (int)oflags, (mode_t)mode), fd);
++    RESTARTABLE(open64(path, amiga_oflags((int)oflags), (mode_t)mode), fd);
+     if (fd == -1) {
+         throwUnixException(env, errno);
+     }
+@@ -400,14 +400,14 @@ Java_sun_nio_fs_UnixNativeDispatcher_openat0(JNIEnv* env, jclass this, jint dfd,
+     jlong pathAddress, jint oflags, jint mode)
+ {
+     jint fd;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     if (my_openat64_func == NULL) {
+         JNU_ThrowInternalError(env, "should not reach here");
+         return -1;
+     }
+ 
+-    RESTARTABLE((*my_openat64_func)(dfd, path, (int)oflags, (mode_t)mode), fd);
++    RESTARTABLE((*my_openat64_func)(dfd, path, amiga_oflags((int)oflags), (mode_t)mode), fd);
+     if (fd == -1) {
+         throwUnixException(env, errno);
+     }
+@@ -467,7 +467,7 @@ static void prepAttributes(JNIEnv* env, struct stat64* buf, jobject attrs) {
+     (*env)->SetLongField(env, attrs, attrs_st_birthtime_sec, (jlong)buf->st_birthtime);
+ #endif
+ 
+-#if (_POSIX_C_SOURCE >= 200809L) || defined(__solaris__)
++#if ((_POSIX_C_SOURCE >= 200809L) || defined(__solaris__)) && !defined(__amigaos4__)
+     (*env)->SetLongField(env, attrs, attrs_st_atime_nsec, (jlong)buf->st_atim.tv_nsec);
+     (*env)->SetLongField(env, attrs, attrs_st_mtime_nsec, (jlong)buf->st_mtim.tv_nsec);
+     (*env)->SetLongField(env, attrs, attrs_st_ctime_nsec, (jlong)buf->st_ctim.tv_nsec);
+@@ -480,7 +480,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_stat0(JNIEnv* env, jclass this,
+ {
+     int err;
+     struct stat64 buf;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     RESTARTABLE(stat64(path, &buf), err);
+     if (err == -1) {
+@@ -496,7 +496,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_lstat0(JNIEnv* env, jclass this,
+ {
+     int err;
+     struct stat64 buf;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     RESTARTABLE(lstat64(path, &buf), err);
+     if (err == -1) {
+@@ -527,7 +527,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_fstatat0(JNIEnv* env, jclass this, jint dfd
+ {
+     int err;
+     struct stat64 buf;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     if (my_fstatat64_func == NULL) {
+         JNU_ThrowInternalError(env, "should not reach here");
+@@ -546,7 +546,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_chmod0(JNIEnv* env, jclass this,
+     jlong pathAddress, jint mode)
+ {
+     int err;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     RESTARTABLE(chmod(path, (mode_t)mode), err);
+     if (err == -1) {
+@@ -572,7 +572,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_chown0(JNIEnv* env, jclass this,
+     jlong pathAddress, jint uid, jint gid)
+ {
+     int err;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     RESTARTABLE(chown(path, (uid_t)uid, (gid_t)gid), err);
+     if (err == -1) {
+@@ -584,7 +584,7 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_lchown0(JNIEnv* env, jclass this, jlong pathAddress, jint uid, jint gid)
+ {
+     int err;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     RESTARTABLE(lchown(path, (uid_t)uid, (gid_t)gid), err);
+     if (err == -1) {
+@@ -609,7 +609,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_utimes0(JNIEnv* env, jclass this,
+ {
+     int err;
+     struct timeval times[2];
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     times[0].tv_sec = accessTime / 1000000;
+     times[0].tv_usec = accessTime % 1000000;
+@@ -636,7 +636,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_futimes(JNIEnv* env, jclass this, jint file
+     times[1].tv_sec = modificationTime / 1000000;
+     times[1].tv_usec = modificationTime % 1000000;
+ 
+-#ifdef _ALLBSD_SOURCE
++#if defined(_ALLBSD_SOURCE) || defined(__amigaos4__)
+     RESTARTABLE(futimes(filedes, &times[0]), err);
+ #else
+     if (my_futimesat_func == NULL) {
+@@ -655,7 +655,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_opendir0(JNIEnv* env, jclass this,
+     jlong pathAddress)
+ {
+     DIR* dir;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     /* EINTR not listed as a possible error */
+     dir = opendir(path);
+@@ -735,7 +735,7 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_mkdir0(JNIEnv* env, jclass this,
+     jlong pathAddress, jint mode)
+ {
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     /* EINTR not listed as a possible error */
+     if (mkdir(path, (mode_t)mode) == -1) {
+@@ -747,7 +747,7 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_rmdir0(JNIEnv* env, jclass this,
+     jlong pathAddress)
+ {
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     /* EINTR not listed as a possible error */
+     if (rmdir(path) == -1) {
+@@ -760,8 +760,8 @@ Java_sun_nio_fs_UnixNativeDispatcher_link0(JNIEnv* env, jclass this,
+     jlong existingAddress, jlong newAddress)
+ {
+     int err;
+-    const char* existing = (const char*)jlong_to_ptr(existingAddress);
+-    const char* newname = (const char*)jlong_to_ptr(newAddress);
++    const char* existing = amiga_path((const char*)jlong_to_ptr(existingAddress));
++    const char* newname = amiga_path((const char*)jlong_to_ptr(newAddress));
+ 
+     RESTARTABLE(link(existing, newname), err);
+     if (err == -1) {
+@@ -774,7 +774,7 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_unlink0(JNIEnv* env, jclass this,
+     jlong pathAddress)
+ {
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     /* EINTR not listed as a possible error */
+     if (unlink(path) == -1) {
+@@ -786,7 +786,7 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_unlinkat0(JNIEnv* env, jclass this, jint dfd,
+                                                jlong pathAddress, jint flags)
+ {
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     if (my_unlinkat_func == NULL) {
+         JNU_ThrowInternalError(env, "should not reach here");
+@@ -803,8 +803,8 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_rename0(JNIEnv* env, jclass this,
+     jlong fromAddress, jlong toAddress)
+ {
+-    const char* from = (const char*)jlong_to_ptr(fromAddress);
+-    const char* to = (const char*)jlong_to_ptr(toAddress);
++    const char* from = amiga_path((const char*)jlong_to_ptr(fromAddress));
++    const char* to = amiga_path((const char*)jlong_to_ptr(toAddress));
+ 
+     /* EINTR not listed as a possible error */
+     if (rename(from, to) == -1) {
+@@ -816,8 +816,8 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_renameat0(JNIEnv* env, jclass this,
+     jint fromfd, jlong fromAddress, jint tofd, jlong toAddress)
+ {
+-    const char* from = (const char*)jlong_to_ptr(fromAddress);
+-    const char* to = (const char*)jlong_to_ptr(toAddress);
++    const char* from = amiga_path((const char*)jlong_to_ptr(fromAddress));
++    const char* to = amiga_path((const char*)jlong_to_ptr(toAddress));
+ 
+     if (my_renameat_func == NULL) {
+         JNU_ThrowInternalError(env, "should not reach here");
+@@ -834,8 +834,8 @@ JNIEXPORT void JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_symlink0(JNIEnv* env, jclass this,
+     jlong targetAddress, jlong linkAddress)
+ {
+-    const char* target = (const char*)jlong_to_ptr(targetAddress);
+-    const char* link = (const char*)jlong_to_ptr(linkAddress);
++    const char* target = amiga_path((const char*)jlong_to_ptr(targetAddress));
++    const char* link = amiga_path((const char*)jlong_to_ptr(linkAddress));
+ 
+     /* EINTR not listed as a possible error */
+     if (symlink(target, link) == -1) {
+@@ -849,7 +849,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_readlink0(JNIEnv* env, jclass this,
+ {
+     jbyteArray result = NULL;
+     char target[PATH_MAX+1];
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     /* EINTR not listed as a possible error */
+     int n = readlink(path, target, sizeof(target));
+@@ -876,7 +876,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_realpath0(JNIEnv* env, jclass this,
+ {
+     jbyteArray result = NULL;
+     char resolved[PATH_MAX+1];
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     /* EINTR not listed as a possible error */
+     if (realpath(path, resolved) == NULL) {
+@@ -896,7 +896,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_access0(JNIEnv* env, jclass this,
+     jlong pathAddress, jint amode)
+ {
+     int err;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     RESTARTABLE(access(path, (int)amode), err);
+     if (err == -1) {
+@@ -910,7 +910,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_statvfs0(JNIEnv* env, jclass this,
+ {
+     int err;
+     struct statvfs64 buf;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+ 
+     RESTARTABLE(statvfs64(path, &buf), err);
+@@ -941,7 +941,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_pathconf0(JNIEnv* env, jclass this,
+     jlong pathAddress, jint name)
+ {
+     long err;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     err = pathconf(path, (int)name);
+     if (err == -1) {
+@@ -968,7 +968,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_mknod0(JNIEnv* env, jclass this,
+     jlong pathAddress, jint mode, jlong dev)
+ {
+     int err;
+-    const char* path = (const char*)jlong_to_ptr(pathAddress);
++    const char* path = amiga_path((const char*)jlong_to_ptr(pathAddress));
+ 
+     RESTARTABLE(mknod(path, (mode_t)mode, (dev_t)dev), err);
+     if (err == -1) {
+@@ -1097,7 +1097,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_getpwnam0(JNIEnv* env, jclass this,
+         struct passwd pwent;
+         struct passwd* p = NULL;
+         int res = 0;
+-        const char* name = (const char*)jlong_to_ptr(nameAddress);
++        const char* name = amiga_path((const char*)jlong_to_ptr(nameAddress));
+ 
+         errno = 0;
+         #ifdef __solaris__
+@@ -1136,7 +1136,7 @@ Java_sun_nio_fs_UnixNativeDispatcher_getgrnam0(JNIEnv* env, jclass this,
+         struct group* g = NULL;
+         int res = 0;
+         char *grbuf;
+-        const char* name = (const char*)jlong_to_ptr(nameAddress);
++        const char* name = amiga_path((const char*)jlong_to_ptr(nameAddress));
+ 
+         grbuf = (char*)malloc(buflen);
+         if (grbuf == NULL) {

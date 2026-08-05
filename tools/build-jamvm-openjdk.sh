@@ -11,23 +11,24 @@
 #     java.lang.String has only value[] (no offset/count), so createString must NOT
 #     use the shared-buffer layout.
 #   - Output is build/jamvm-openjdk (keeps the working gnuclasspath build/jamvm).
-# Everything else (clib4 overlay, -use-dynld, rpath=SYS:Test, libs) is identical.
+# Everything else (clib4 overlay, -use-dynld, rpath=JAVA:Sobjs, libs) is identical.
 #
 #   docker run --rm -v "<proj>:/work" -w /work \
 #       javaos4-build:latest sh /work/tools/build-jamvm-openjdk.sh
 # (clib4 is the in-repo clib4/ submodule, built first by tools/build-clib4.sh.)
 set -e
+. "$(dirname "$0")/build-env.sh"
 
 # --- overlay local clib4 over the SDK clib4 --------------------------------
-SDKCLIB4=/opt/ppc-amigaos/ppc-amigaos/SDK/clib4
-if [ -d /work/clib4/build/lib ]; then
-    cp -f /work/clib4/build/lib/*.a "$SDKCLIB4/lib/" 2>/dev/null || true
-    cp -f /work/clib4/build/lib/*.o "$SDKCLIB4/lib/" 2>/dev/null || true
-    cp -rf /work/clib4/library/include/* "$SDKCLIB4/include/" 2>/dev/null || true
+SDKCLIB4=$SDK_CLIB4
+if [ -n "${CLIB4_BUILD_ROOT:-}" ] && [ -d "$CLIB4_BUILD_ROOT/build/lib" ]; then
+    cp -f "$CLIB4_BUILD_ROOT"/build/lib/*.a "$SDKCLIB4/lib/" 2>/dev/null || true
+    cp -f "$CLIB4_BUILD_ROOT"/build/lib/*.o "$SDKCLIB4/lib/" 2>/dev/null || true
+    cp -rf "$CLIB4_BUILD_ROOT"/library/include/* "$SDKCLIB4/include/" 2>/dev/null || true
     echo "=== overlaid in-repo clib4 submodule (clib4/build/lib + library/include) ==="
 fi
 
-cd /work/vendor/jamvm/src
+cd "$PROJECT_ROOT/vendor/jamvm/src"
 
 # Install the openjdk classlib headers as src/classlib*.h -- this is what
 # configure would symlink for the chosen classlib.  `-I .` resolves
@@ -77,43 +78,53 @@ done
 
 echo "=== os/amiga (clib4: os.c + arch only) ==="
 compile os/amiga/os.c             os_os
+compile os/amiga/real_amiga_exit.c os_real_amiga_exit
 compile os/amiga/powerpc/dll_md.c ppc_dll_md
 compile os/amiga/powerpc/init.c   ppc_init
 ppc-amigaos-gcc $CFLAGS -c os/amiga/powerpc/callNative.S -o "$OUT/ppc_callNative.o"
 OBJS="$OBJS $OUT/ppc_callNative.o"
 
-DEST=/work/build
+# OpenJDK's Shutdown.beforeHalt() calls into the VM hook JVM_BeforeHalt().
+# JamVM does not export that hook, so provide a harmless no-op compatibility
+# symbol in libjvm.so.
+cat > "$OUT/jvm_beforehalt_compat.c" <<'EOF'
+void JVM_BeforeHalt(void) { }
+EOF
+ppc-amigaos-gcc $CFLAGS -c "$OUT/jvm_beforehalt_compat.c" -o "$OUT/jvm_beforehalt_compat.o"
+OBJS="$OBJS $OUT/jvm_beforehalt_compat.o"
+
+DEST=$BUILD_ROOT
 mkdir -p "$DEST"
 
 # libjvm.so = the VM as a SHARED library (upstream's libjvm.la = libcore).  A .so
 # exports its defined symbols, so OpenJDK's libjava.so can resolve JVM_*/JNI_*
 # against it at dlopen (an executable can't export them on AmigaOS -- see memory
-# phase2-openjdk8-scoping).  rpath=SYS:Test for the clib4 sobjs.
+# phase2-openjdk8-scoping).  rpath=JAVA:Sobjs for the clib4 sobjs.
 echo "=== linking libjvm.so (shared VM) ==="
 # Plain -shared (NOT -use-dynld, which forces --no-undefined): leave libc/pthread/
 # zlib/JNI undefined -> resolved at runtime against the clib4 sobjs that the
 # -use-dynld launcher loads (global symbol scope), same as the classpath natives.
-ppc-amigaos-gcc -mcrt=clib4 -shared -fPIC -Wl,-rpath=PROGDIR: \
+ppc-amigaos-gcc -mcrt=clib4 -shared -fPIC -Wl,-rpath=JAVA:Sobjs \
     -o "$DEST/libjvm.so" $OBJS
 echo "  libjvm.so OK ($(wc -c < "$DEST/libjvm.so") bytes)"
 
 # AmigaOS $VER: cookie (read by the `Version` command), linked into the
 # launcher.  Version proper = the Java-OS4 project version (clean major.minor);
 # the OpenJDK class-library version follows as free text.
-PVER=$(cut -d. -f1,2 /work/VERSION 2>/dev/null)
+PVER=$(cut -d. -f1,2 "$PROJECT_ROOT/VERSION" 2>/dev/null)
 [ -n "$PVER" ] || PVER="0.0"
-JVER=$(sed -n 's/^JAVA_VERSION="\(.*\)"$/\1/p' /opt/jdk8/release 2>/dev/null)
+JVER=$(sed -n 's/^JAVA_VERSION="\(.*\)"$/\1/p' "$BOOT_JDK/release" 2>/dev/null)
 [ -n "$JVER" ] || JVER="1.8.0"
 JDATE=$(date +%d.%m.%Y)
 ppc-amigaos-gcc -mcrt=clib4 -O2 -fPIC \
     -DJAVAOS4_VER="\"$PVER\"" -DJAVAOS4_JAVAVER="\"$JVER\"" \
     -DJAVAOS4_DATE="\"$JDATE\"" \
-    -c /work/src/version/verstag.c -o "$OUT/verstag.o"
+    -c "$PROJECT_ROOT/src/version/verstag.c" -o "$OUT/verstag.o"
 
 # jamvm launcher = jam.c (main) linked AGAINST libjvm.so -- one shared VM instance
 # (so jam.c's main and any dlopen'd libjava see the same VM).
 echo "=== linking jamvm-openjdk launcher (-> libjvm.so) ==="
-ppc-amigaos-gcc -mcrt=clib4 -use-dynld -athread=native -Wl,-rpath=PROGDIR: \
+ppc-amigaos-gcc -mcrt=clib4 -use-dynld -athread=native -Wl,-rpath=JAVA:Sobjs \
     -o "$DEST/jamvm-openjdk" "$JAMO" "$OUT/verstag.o" -L"$DEST" -ljvm \
     -lpthread -lm -lrt -lz -lauto
 echo "LINK OK"

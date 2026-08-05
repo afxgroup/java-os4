@@ -16,14 +16,16 @@
 #       javaos4-build:latest sh /work/tools/build-openjdk-natives.sh
 set -e
 
-SDKCLIB4=/opt/ppc-amigaos/ppc-amigaos/SDK/clib4
-if [ -d /clib4/build/lib ]; then
-    cp -f /clib4/build/lib/*.a /clib4/build/lib/*.o "$SDKCLIB4/lib/" 2>/dev/null || true
-    cp -rf /clib4/library/include/* "$SDKCLIB4/include/" 2>/dev/null || true
+. "$(dirname "$0")/build-env.sh"
+
+SDKCLIB4=$SDK_CLIB4
+if [ -n "${CLIB4_BUILD_ROOT:-}" ] && [ -d "$CLIB4_BUILD_ROOT/build/lib" ]; then
+    cp -f "$CLIB4_BUILD_ROOT"/build/lib/*.a "$CLIB4_BUILD_ROOT"/build/lib/*.o "$SDKCLIB4/lib/" 2>/dev/null || true
+    cp -rf "$CLIB4_BUILD_ROOT"/library/include/* "$SDKCLIB4/include/" 2>/dev/null || true
 fi
 
-J=/work/build/openjdk8/jdk-3334efeacd83
-OUT=/work/build/openjdk-natives
+J=${OPENJDK8_SRC:-$BUILD_ROOT/openjdk8/jdk-3334efeacd83}
+OUT=$BUILD_ROOT/openjdk-natives
 mkdir -p "$OUT"
 # -fcommon: OpenJDK (like the 2016 JamVM tree) defines globals in headers without
 # extern (e.g. parentPathv); gcc 10+ defaults to -fno-common -> multiple-definition.
@@ -38,13 +40,13 @@ echo '#include <signal.h>' > "$COMPAT/sys/signal.h"   # clib4 has <signal.h>, no
 # Single-source-of-truth Amiga charset-name normaliser (the "Amiga-1251" fix):
 # force-included via jdkdefs.h below and called from java_props_md.c ParseLocale().
 # Tested on the host by tools/test-amiga-charset.c against the same header.
-cp /work/src/openjdk/amiga_charset.h "$COMPAT/amiga_charset.h"
+cp "$PROJECT_ROOT/src/openjdk/amiga_charset.h" "$COMPAT/amiga_charset.h"
 # Self-test that normaliser on the HOST compiler before building libjava, so a
 # broken charset mapping fails the build fast (10 languages + edge cases).
 # Skipped (with a warning) if no host cc/gcc is present.
 HOSTCC=$(command -v cc || command -v gcc || true)
 if [ -n "$HOSTCC" ]; then
-    if "$HOSTCC" /work/tools/test-amiga-charset.c -o "$OUT/test-amiga-charset" 2>"$OUT/e"; then
+    if "$HOSTCC" "$PROJECT_ROOT/tools/test-amiga-charset.c" -o "$OUT/test-amiga-charset" 2>"$OUT/e"; then
         "$OUT/test-amiga-charset" || { echo "FATAL: amiga charset self-test FAILED"; exit 1; }
         echo "=== amiga charset self-test PASSED ==="
     else
@@ -282,8 +284,8 @@ fi
 
 echo "=== javah: generate JNI headers (from Temurin rt.jar) ==="
 HDR="$OUT/headers"; mkdir -p "$HDR"
-RTJAR=/opt/jdk8/jre/lib/rt.jar
-/opt/jdk8/bin/javah -d "$HDR" -classpath "$RTJAR" \
+RTJAR="$BOOT_JDK/jre/lib/rt.jar"
+"$BOOT_JDK/bin/javah" -d "$HDR" -classpath "$RTJAR" \
   java.io.Console java.io.FileDescriptor java.io.FileInputStream java.io.FileOutputStream \
   java.io.FileSystem java.io.ObjectInputStream java.io.ObjectOutputStream \
   java.io.ObjectStreamClass java.io.RandomAccessFile java.io.UnixFileSystem \
@@ -333,9 +335,9 @@ for d in $LJDIRS; do
 done
 echo "  libjava compile: $ok OK, $fail FAILED"
 
-# java.lang.Shutdown.beforeHalt(): native added in later 8u (absent in 8u77) -- a
-# shutdown hook that does nothing essential.  Supply a no-op so the VM exits without
-# UnsatisfiedLinkError.  (Temurin-vs-8u77 skew, "added" kind like getManifestNum.)
+# java.lang.Shutdown.beforeHalt(): some 8u drops already provide it; only synthesize
+# the no-op compat stub when the native source does not.
+if ! grep -q 'Java_java_lang_Shutdown_beforeHalt' "$J/src/share/native/java/lang/Shutdown.c"; then
 cat > "$OUT/libjava/shutdown_beforehalt_compat.c" <<'SEOF'
 #include "jni.h"
 JNIEXPORT void JNICALL
@@ -343,6 +345,9 @@ Java_java_lang_Shutdown_beforeHalt(JNIEnv *env, jclass cls) { }
 SEOF
 $CC $LJINC -c "$OUT/libjava/shutdown_beforehalt_compat.c" -o "$OUT/libjava/shutdown_beforehalt_compat.o" 2>"$OUT/e" \
     && echo "  Shutdown.beforeHalt compat OK" || { echo "  beforeHalt compat FAIL"; head -4 "$OUT/e"; }
+else
+    rm -f "$OUT/libjava/shutdown_beforehalt_compat.c" "$OUT/libjava/shutdown_beforehalt_compat.o"
+fi
 
 echo "=== link libjava.so ==="
 # Recipe (CoreLibraries.gmk): libjava links -lverify + static libfdlibm.  The VM
@@ -427,11 +432,11 @@ echo "=== niopatch.zip (bootclasspath-prepend NIO.2 platform patch) ==="
 # which kills URLClassLoader/-classpath.  Ship a patched class (always the generic
 # unix/Linux provider) PREPENDED on -Xbootclasspath.  Run with
 # -Dsun.nio.fs.chdirAllowed=true so provider construction needs no libnio natives.
-NIOP=/work/src/niopatch
+NIOP="$PROJECT_ROOT/src/niopatch"
 if [ -f "$NIOP/sun/nio/fs/DefaultFileSystemProvider.java" ]; then
     (cd "$NIOP" \
-     && /opt/jdk8/bin/javac -source 8 -target 8 sun/nio/fs/DefaultFileSystemProvider.java 2>/dev/null \
-     && /opt/jdk8/bin/jar cf "$OUT/niopatch.zip" sun/nio/fs/DefaultFileSystemProvider.class) \
+    && "$BOOT_JDK/bin/javac" -source 8 -target 8 sun/nio/fs/DefaultFileSystemProvider.java 2>/dev/null \
+    && "$BOOT_JDK/bin/jar" cf "$OUT/niopatch.zip" sun/nio/fs/DefaultFileSystemProvider.class) \
     && echo "  niopatch.zip OK ($(wc -c < "$OUT/niopatch.zip") bytes)" \
     || echo "  niopatch.zip FAIL"
 fi
@@ -526,14 +531,15 @@ if [ -f "$UND" ] && ! grep -q "200809L) || defined(__solaris__)) && !defined(__a
 fi
 
 echo "  javah (nio classes from Temurin rt.jar)"
-/opt/jdk8/bin/javah -d "$HDR" -classpath "$RTJAR" \
+"$BOOT_JDK/bin/javah" -d "$HDR" -classpath "$RTJAR" \
   sun.nio.fs.UnixNativeDispatcher sun.nio.fs.UnixCopyFile sun.nio.fs.LinuxNativeDispatcher \
   sun.nio.ch.FileChannelImpl sun.nio.ch.FileDispatcherImpl sun.nio.ch.FileKey \
   sun.nio.ch.IOUtil sun.nio.ch.NativeThread sun.nio.ch.IOStatus \
   java.lang.Integer java.lang.Long 2>&1 | tail -2
 
-NIOINC="-I $HDR $EXP -I $J/src/solaris/native/common -I $NCH \
+NIOINC="-I $HDR $EXP -I $J/src/share/native/common -I $J/src/solaris/native/common -I $NCH \
  -I $J/src/share/native/sun/nio/ch -I $J/src/share/native/java/io \
+ -I $J/src/share/native/java/net -I $J/src/solaris/native/java/net \
  -I $J/src/solaris/native/java/io -include $COMPAT/jdkdefs.h"
 mkdir -p "$OUT/libnio"
 nok=0; nfail=0
@@ -548,8 +554,9 @@ for c in "$NFS/UnixNativeDispatcher.c" "$NFS/UnixCopyFile.c" "$NFS/LinuxNativeDi
         grep -m2 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
     fi
 done
-# FileDispatcherImpl.seek0: native added in later 8u (8u77 had FileChannelImpl
-# position0 instead); Temurin's rt.jar calls seek0 -> supply it (7th skew).
+# FileDispatcherImpl.seek0: some 8u drops already provide it; only synthesize the
+# compat stub when the native source does not.
+if ! grep -q 'Java_sun_nio_ch_FileDispatcherImpl_seek0' "$NCH/FileDispatcherImpl.c"; then
 cat > "$OUT/libnio/seek0_compat.c" <<'SEOF'
 #include "jni.h"
 #include "jni_util.h"
@@ -575,8 +582,97 @@ if $CC -D_GNU_SOURCE $NIOINC -c "$OUT/libnio/seek0_compat.c" -o "$OUT/libnio/see
 else
     echo "  seek0 compat FAIL"; head -4 "$OUT/e"
 fi
+else
+    rm -f "$OUT/libnio/seek0_compat.c" "$OUT/libnio/seek0_compat.o"
+fi
 
 echo "  libnio compile: $nok OK, $nfail FAILED"
+# IOUtil.c calls initInetAddressIDs() (defined in libnet's net_util.c on Unix).
+# Our libnet.so is just a stub, so provide the symbol in libnio.so together with
+# the InetAddress* init helpers it needs.
+cat > "$OUT/libnio/inetaddress_compat.c" <<'IEOF'
+#include "jni.h"
+#include "jni_util.h"
+
+static int ia_initialized = 0;
+JNIEXPORT void JNICALL
+Java_java_net_InetAddress_init(JNIEnv *env, jclass cls) {
+    jclass c, iac;
+    (void)cls;
+    if (ia_initialized) return;
+    c = (*env)->FindClass(env, "java/net/InetAddress");
+    CHECK_NULL(c);
+    iac = (*env)->FindClass(env, "java/net/InetAddress$InetAddressHolder");
+    CHECK_NULL(iac);
+    (void)(*env)->GetFieldID(env, c, "holder", "Ljava/net/InetAddress$InetAddressHolder;");
+    (void)(*env)->GetStaticFieldID(env, c, "preferIPv6Address", "Z");
+    (void)(*env)->GetFieldID(env, iac, "address", "I");
+    (void)(*env)->GetFieldID(env, iac, "family", "I");
+    (void)(*env)->GetFieldID(env, iac, "hostName", "Ljava/lang/String;");
+    (void)(*env)->GetFieldID(env, iac, "originalHostName", "Ljava/lang/String;");
+    ia_initialized = 1;
+}
+
+static int ia4_initialized = 0;
+JNIEXPORT void JNICALL
+Java_java_net_Inet4Address_init(JNIEnv *env, jclass cls) {
+    jclass c;
+    (void)cls;
+    if (ia4_initialized) return;
+    c = (*env)->FindClass(env, "java/net/Inet4Address");
+    CHECK_NULL(c);
+    (void)(*env)->GetMethodID(env, c, "<init>", "()V");
+    ia4_initialized = 1;
+}
+
+static int ia6_initialized = 0;
+JNIEXPORT void JNICALL
+Java_java_net_Inet6Address_init(JNIEnv *env, jclass cls) {
+    jclass c, h;
+    (void)cls;
+    if (ia6_initialized) return;
+    c = (*env)->FindClass(env, "java/net/Inet6Address");
+    CHECK_NULL(c);
+    h = (*env)->FindClass(env, "java/net/Inet6Address$Inet6AddressHolder");
+    CHECK_NULL(h);
+    (void)(*env)->GetFieldID(env, c, "holder6", "Ljava/net/Inet6Address$Inet6AddressHolder;");
+    (void)(*env)->GetFieldID(env, h, "ipaddress", "[B");
+    (void)(*env)->GetFieldID(env, h, "scope_id", "I");
+    (void)(*env)->GetFieldID(env, c, "cached_scope_id", "I");
+    (void)(*env)->GetFieldID(env, h, "scope_id_set", "Z");
+    (void)(*env)->GetFieldID(env, h, "scope_ifname", "Ljava/net/NetworkInterface;");
+    (void)(*env)->GetMethodID(env, c, "<init>", "()V");
+    ia6_initialized = 1;
+}
+
+JNIEXPORT void JNICALL
+initInetAddressIDs(JNIEnv *env) {
+    static int initialized = 0;
+    if (!initialized) {
+        Java_java_net_InetAddress_init(env, 0);
+        Java_java_net_Inet4Address_init(env, 0);
+        Java_java_net_Inet6Address_init(env, 0);
+        initialized = 1;
+    }
+}
+
+/* InetAddressImplFactory.isIPv6Supported() is called during InetAddress clinit
+ * (and transitively by IOUtil/FileChannelImpl clinit).  AmigaOS 4/clib4 has no
+ * IPv6 dual-stack support in this build, so report false to let initialization
+ * complete without UnsatisfiedLinkError. */
+JNIEXPORT jboolean JNICALL
+Java_java_net_InetAddressImplFactory_isIPv6Supported(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return JNI_FALSE;
+}
+IEOF
+if $CC -D_GNU_SOURCE $NIOINC -c "$OUT/libnio/inetaddress_compat.c" -o "$OUT/libnio/inetaddress_compat.o" 2>"$OUT/e"; then
+    echo "  inetaddress compat OK"
+else
+    echo "  inetaddress compat FAIL"; head -10 "$OUT/e"
+fi
+
 if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=SYS:Test \
        -o "$OUT/libnio.so" "$OUT"/libnio/*.o 2>"$OUT/e"; then
     echo "  libnio.so OK ($(wc -c < "$OUT/libnio.so") bytes)"
@@ -587,8 +683,21 @@ fi
 # stub libnet.so: sun.nio.ch.IOUtil.load() does loadLibrary("net") before "nio";
 # an empty lib satisfies it (real java.net natives are a future work item --
 # they'd surface as UnsatisfiedLinkError on first socket use).
-echo 'static int amiga_libnet_stub;' > "$OUT/libnio/net_stub.c"
-$CC -c "$OUT/libnio/net_stub.c" -o "$OUT/libnio/net_stub.o" 2>/dev/null
+# We must also provide InetAddressImplFactory.isIPv6Supported() here: it is
+# resolved from libnet during java.net.InetAddress clinit, before libnio is
+# loaded, and a missing symbol breaks IOUtil/FileChannelImpl clinit.
+cat > "$OUT/libnio/net_stub.c" <<'NEOF'
+#include "jni.h"
+static int amiga_libnet_stub;
+
+JNIEXPORT jboolean JNICALL
+Java_java_net_InetAddressImplFactory_isIPv6Supported(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return JNI_FALSE;
+}
+NEOF
+$CC -D_GNU_SOURCE $EXP -c "$OUT/libnio/net_stub.c" -o "$OUT/libnio/net_stub.o" 2>/dev/null
 ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=SYS:Test \
     -o "$OUT/libnet.so" "$OUT/libnio/net_stub.o" 2>/dev/null \
     && echo "  libnet.so (stub) OK ($(wc -c < "$OUT/libnet.so") bytes)"

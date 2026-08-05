@@ -10,11 +10,12 @@
 #   docker run --rm -v "<proj>:/work" -w /work javaos4-build:latest \
 #       sh /work/tools/build-tests.sh
 set -e
-JDK8=/opt/jdk8
+. "$(dirname "$0")/build-env.sh"
+JDK8=$BOOT_JDK
 RT="$JDK8/jre/lib/rt.jar"
 JAVAC="$JDK8/bin/javac"
 JAR="$JDK8/bin/jar"
-B=/work/build
+B=$BUILD_ROOT
 TC="$B/tests-out"
 EX="$B/examples"
 rm -rf "$TC"; mkdir -p "$TC/classes" "$EX"
@@ -22,9 +23,9 @@ rm -rf "$TC"; mkdir -p "$TC/classes" "$EX"
 echo "=== compiling test suite ==="
 "$JAVAC" -source 8 -target 8 -encoding UTF-8 -bootclasspath "$RT" \
     -d "$TC/classes" \
-    /work/tests/regression/VmSuite.java /work/tests/regression/KeyBindTest.java \
-    /work/tests/regression/CloseTest.java /work/tests/regression/VersionGateTest.java \
-    /work/tests/regression/BootClassPathTest.java
+    "$PROJECT_ROOT/tests/regression/VmSuite.java" "$PROJECT_ROOT/tests/regression/KeyBindTest.java" \
+    "$PROJECT_ROOT/tests/regression/CloseTest.java" "$PROJECT_ROOT/tests/regression/VersionGateTest.java" \
+    "$PROJECT_ROOT/tests/regression/BootClassPathTest.java"
 
 # Version-gate fixture: a normal Java 8 class whose class-file major version is
 # bumped 52 -> 53 (Java 9), so the VM must reject it with
@@ -49,7 +50,7 @@ echo "=== compiling examples ==="
 for app in HelloJava SwingDemo; do
     rm -rf "$TC/ex-$app"; mkdir -p "$TC/ex-$app"
     "$JAVAC" -source 8 -target 8 -encoding UTF-8 -bootclasspath "$RT" \
-        -d "$TC/ex-$app" "/work/examples/$app.java"
+        -d "$TC/ex-$app" "$PROJECT_ROOT/examples/$app.java"
     (cd "$TC/ex-$app" && "$JAR" cfe "$EX/$app.jar" "$app" .)
     echo "  $app.jar OK ($(wc -c < "$EX/$app.jar") bytes)"
 done

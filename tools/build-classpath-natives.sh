@@ -37,10 +37,10 @@ mklib() { # <name> <src...>
         o="$OUT/$(basename "$c" .c).o"
         if cc1 "$c" "$o"; then objs="$objs $o"; else echo "  [lib$name] compile FAIL $(basename "$c")"; head -3 "$OUT/e"; fi
     done
-    # -Wl,-rpath=SYS:Test so the .so finds the shipped clib4 libc.so etc. at load;
+    # -Wl,-rpath=JAVA:Sobjs so the .so finds the shipped clib4 libc.so etc. at load;
     # -mcrt=clib4 on a -shared link records clib4's libc.so as a NEEDED dependency
     # (mirrors clib4's dlopen sample) so undefined libc/IExec refs bind at load time.
-    if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=SYS:Test -o "$OUT/lib$name.so" $objs $HELP 2>"$OUT/e"; then
+    if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs -o "$OUT/lib$name.so" $objs $HELP 2>"$OUT/e"; then
         echo "  lib$name.so OK ($(wc -c < "$OUT/lib$name.so") bytes)"
     else
         echo "  lib$name.so LINK FAIL"; head -6 "$OUT/e"

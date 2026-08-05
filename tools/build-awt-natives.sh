@@ -15,18 +15,21 @@
 #       javaos4-build:latest sh /work/tools/build-awt-natives.sh
 # (clib4 is the in-repo clib4/ submodule, built first by tools/build-clib4.sh.)
 set -e
+. "$(dirname "$0")/build-env.sh"
 
-SDKCLIB4=/opt/ppc-amigaos/ppc-amigaos/SDK/clib4
-if [ -d /work/clib4/build/lib ]; then
-    cp -f /work/clib4/build/lib/*.a /work/clib4/build/lib/*.o "$SDKCLIB4/lib/" 2>/dev/null || true
-    cp -rf /work/clib4/library/include/* "$SDKCLIB4/include/" 2>/dev/null || true
+SDKCLIB4=$SDK_CLIB4
+if [ -n "${CLIB4_BUILD_ROOT:-}" ] && [ -d "$CLIB4_BUILD_ROOT/build/lib" ]; then
+    cp -f "$CLIB4_BUILD_ROOT"/build/lib/*.a "$CLIB4_BUILD_ROOT"/build/lib/*.o "$SDKCLIB4/lib/" 2>/dev/null || true
+    cp -rf "$CLIB4_BUILD_ROOT"/library/include/* "$SDKCLIB4/include/" 2>/dev/null || true
 fi
 
-J=/work/build/openjdk8/jdk-3334efeacd83
-OUT=/work/build/openjdk-natives
+J=${OPENJDK8_SRC:-$BUILD_ROOT/openjdk8/jdk-3334efeacd83}
+[ -d "$J" ] || { echo "FATAL: OpenJDK 8 sources not found (set OPENJDK8_SRC)"; exit 1; }
+apply_openjdk_patch
+OUT=$BUILD_ROOT/openjdk-natives
 COMPAT="$OUT/compat"
 HDR="$OUT/headers"
-RTJAR=/opt/jdk8/jre/lib/rt.jar
+RTJAR=$BOOT_JDK/jre/lib/rt.jar
 CC="ppc-amigaos-gcc -mcrt=clib4 -fPIC -O2 -w -fcommon"
 mkdir -p "$OUT/libawt" "$HDR"
 
@@ -97,7 +100,7 @@ CLASSES=$(cat $SRCLIST 2>/dev/null \
     | sed 's/"//g; s/\.h$//; s/_/./g' | sort -u)
 hok=0; hfail=0
 for c in $CLASSES; do
-    if /opt/jdk8/bin/javah -d "$HDR" -classpath "$RTJAR" "$c" >/dev/null 2>&1; then
+    if "$BOOT_JDK/bin/javah" -d "$HDR" -classpath "$RTJAR" "$c" >/dev/null 2>&1; then
         hok=$((hok+1))
     else
         hfail=$((hfail+1))
@@ -174,12 +177,19 @@ Java_java_awt_event_KeyEvent_initIDs(JNIEnv *env, jclass cls) { }
    awt_UNIXToolkit.c (X11 set, not built) */
 JNIEXPORT void JNICALL
 Java_sun_awt_SunToolkit_closeSplashScreen(JNIEnv *env, jclass cls) { }
+/* Swing/AWT dispatch can call this even in our lightweight peer setup. */
+JNIEXPORT void JNICALL
+Java_java_awt_AWTEvent_nativeSetSource(JNIEnv *env, jobject self, jobject peer) {
+    (void)env;
+    (void)self;
+    (void)peer;
+}
 FEOF
 $CC $AWTINC -c "$OUT/libawt/font_initids_compat.c" -o "$OUT/libawt/font_initids_compat.o" 2>"$OUT/e" \
     && echo "  awt initIDs compat OK" || { echo "  awt initIDs compat FAIL"; head -3 "$OUT/e"; }
 
 echo "=== link libawt.so ==="
-if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=SYS:Test \
+if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
        -o "$OUT/libawt.so" "$OUT"/libawt/*.o 2>"$OUT/e"; then
     echo "  libawt.so OK ($(wc -c < "$OUT/libawt.so") bytes)"
 else
@@ -191,9 +201,9 @@ echo "=== libfontmanager.so (freetype rasterizer; M2 fonts) ==="
 # The ICU layout engine (layout/*.cpp, C++ -- complex-script shaping only) is
 # NOT built; its sun.font.SunLayoutEngine natives surface only via TextLayout
 # of complex scripts.  freetype: SDK/local clib4 static libfreetype.a.
-FT_INC="-I /opt/ppc-amigaos/ppc-amigaos/SDK/local/common/include \
- -I /opt/ppc-amigaos/ppc-amigaos/SDK/local/common/include/freetype2"
-FT_LIB="-L /opt/ppc-amigaos/ppc-amigaos/SDK/local/clib4/lib"
+FT_INC="-I $SDK_LOCAL_COMMON_INCLUDE \
+ -I $SDK_LOCAL_FREETYPE_INCLUDE"
+FT_LIB="-L $SDK_LOCAL_CLIB4_LIB"
 FONTFILES="sunFont.c freetypeScaler.c DrawGlyphList.c AccelGlyphCache.c"
 FONTSRC="$SH/font"
 FMINC="-I $HDR -I $COMPAT $FT_INC \
@@ -207,7 +217,7 @@ FCLASSES=$(cat $(for f in $FONTFILES; do echo "$FONTSRC/$f"; done) "$FONTSRC"/*.
     | grep -ohE '"(java|sun)_[A-Za-z0-9_]+\.h"' \
     | sed 's/"//g; s/\.h$//; s/_/./g' | sort -u)
 for c in $FCLASSES; do
-    /opt/jdk8/bin/javah -d "$HDR" -classpath "$RTJAR" "$c" >/dev/null 2>&1 || true
+    "$BOOT_JDK/bin/javah" -d "$HDR" -classpath "$RTJAR" "$c" >/dev/null 2>&1 || true
 done
 
 mkdir -p "$OUT/libfontmanager"
@@ -264,7 +274,7 @@ else
 fi
 
 echo "  libfontmanager compile: $fok OK, $ffail FAILED"
-if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=SYS:Test \
+if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
        -o "$OUT/libfontmanager.so" "$OUT"/libfontmanager/*.o $FT_LIB -lfreetype 2>"$OUT/e"; then
     echo "  libfontmanager.so OK ($(wc -c < "$OUT/libfontmanager.so") bytes)"
 else

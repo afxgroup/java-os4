@@ -87,9 +87,9 @@ mkdir -p "$DEST"
 #   the dlopen'd GNU Classpath native .so files (lets them resolve malloc/IExec/...).
 # -athread=native: thread model required by the dynamic-linker startup (per clib4's
 #   dlopen sample).
-# -Wl,-rpath=SYS:Test: where the loader finds the shipped clib4 sobjs (libc.so etc.)
+# -Wl,-rpath=JAVA:Sobjs: where the loader finds the shipped clib4 sobjs (libc.so etc.)
 #   at runtime -- deployed alongside jamvm. Do NOT touch the system SOBJS: (newlib).
-ppc-amigaos-gcc -mcrt=clib4 -use-dynld -athread=native -Wl,-rpath=SYS:Test \
+ppc-amigaos-gcc -mcrt=clib4 -use-dynld -athread=native -Wl,-rpath=JAVA:Sobjs \
     -o "$DEST/jamvm" $OBJS -lpthread -lm -lrt -lz -lauto
 echo "LINK OK"
 ls -la "$DEST/jamvm"

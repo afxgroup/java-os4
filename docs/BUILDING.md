@@ -15,13 +15,17 @@ run the result.
   (`AmigaLabs/clib4`, `development` branch). Check it out with
   `git submodule update --init` (or clone the repo with `--recursive`). The build
   compiles clib4 from this submodule, so the runtime always matches the build.
-- **The vendored JamVM + OpenJDK 8 sources** — large public upstream trees,
-  gitignored here (only our changes are tracked, as the patch under `docs/`).
-  Fetch them once with **`make vendor`** (or `sh tools/fetch-vendor.sh`): it clones
+- **The OpenJDK 8 native-source tree** — tracked as the **`vendor/openjdk8`** git
+  submodule, pinned to the project source level (`jdk8u77-b03`, matching the
+  JDK `3334efeacd83` tree used by the native build scripts). Check it out with
+  `git submodule update --init vendor/openjdk8`.
+- **The vendored JamVM + IcedTea 8 harness** — public upstream trees, gitignored
+  here (only our changes are tracked, as the patch under `docs/`). Fetch them
+  once with **`make vendor`** (or `sh tools/fetch-vendor.sh`): it clones
   [`jaokim/jamiga-jamvm`](https://github.com/jaokim/jamiga-jamvm) into
   `vendor/jamvm` and applies `docs/jamvm-amiga-openjdk.patch`, and clones
   [`jaokim/jamiga-icedtea8-3.0`](https://github.com/jaokim/jamiga-icedtea8-3.0)
-  into `vendor/icedtea8` (see *Getting the OpenJDK 8 native sources* below).
+  into `vendor/icedtea8`.
 
 Build the image once (rebuild when `tools/Dockerfile` changes):
 
@@ -32,6 +36,67 @@ docker build -t javaos4-build:latest -f tools/Dockerfile .
 > **Windows:** run Docker from PowerShell (call `docker.exe` directly). The
 > Git-Bash/MSYS layer rewrites the `-v`/`-w` paths and breaks the mounts.
 
+## Local host build (no Docker)
+
+If you already have the AmigaOS 4 cross toolchain installed locally, you can run
+the same pipeline directly on the host with `Makefile.local` instead of Docker.
+This path reuses the installed SDK clib4 and does not fetch or rebuild the
+in-repo `clib4/` tree.
+
+Prerequisites:
+
+- `ppc-amigaos-gcc` and the AmigaOS SDK on `PATH`
+- `clib4` already installed in the SDK, typically `/usr/ppc-amigaos/SDK/clib4`
+- a host **JDK 8** with `javah` available; point `BOOT_JDK` at its home if it is
+  not on `JAVA_HOME`
+- the OpenJDK 8 native sources, preferably via the tracked `vendor/openjdk8`
+  git submodule pinned to the project source level (`jdk8u77-b03`, matching the
+  JDK `3334efeacd83` tree used here); alternatively pass
+  `OPENJDK8_SRC=/path/to/jdk-*`
+
+Example:
+
+```sh
+git submodule update --init vendor/openjdk8
+make vendor
+make -f Makefile.local build \
+  SDK_BASE=/usr/ppc-amigaos/SDK \
+  BOOT_JDK=/opt/jdk8 \
+  OPENJDK8_SRC=$PWD/vendor/openjdk8
+
+make -f Makefile.local dist \
+  SDK_BASE=/usr/ppc-amigaos/SDK \
+  BOOT_JDK=/opt/jdk8 \
+  OPENJDK8_SRC=$PWD/vendor/openjdk8
+```
+
+`make -f Makefile.local check-local` validates those paths before running the
+build scripts.
+
+### OpenJDK patch reproducibility
+
+To make submodule builds reproducible across clones, the OpenJDK native-source
+adaptations are tracked in `docs/openjdk8-amiga.patch` and auto-applied by the
+native build scripts when possible (`git apply` check). If the patch is already
+applied, scripts continue without changes; if it cannot be applied cleanly, the
+existing idempotent script-side adaptations are still executed.
+
+### Strict unresolved-symbol diagnostics
+
+`tools/build-openjdk-natives.sh` supports an optional strict linker mode:
+
+```sh
+STRICT_NO_UNDEFINED=nio make -f Makefile.local natives
+```
+
+Values:
+- `off` (default): normal build behavior.
+- `nio`: enable `-Wl,--no-undefined` only for `libnio.so`.
+- `all`: enable it for all OpenJDK native `.so` built by the script.
+
+Note: `all` is intentionally noisy in this project model because several
+symbols are expected to resolve at runtime across VM/runtime libraries.
+
 In the commands below the working directory is the repository root.
 
 ## Build steps
@@ -40,7 +105,7 @@ The `Makefile` drives the cross build (each target runs the matching `tools/`
 script inside the image and writes to `build/`):
 
 ```sh
-git submodule update --init       # check out the clib4/ submodule, once
+git submodule update --init clib4 vendor/openjdk8
 make vendor                       # fetch JamVM + IcedTea 8 upstream sources, once
 make image                        # build the build image (pulls walkero base), once
 make build                        # clib4 + VM + OpenJDK/AWT natives + toolkit
@@ -64,15 +129,12 @@ libraries, the clib4/support shared objects, the font data, and the launcher.
 ### Getting the OpenJDK 8 native sources
 
 `make natives` compiles `libjava` / `libawt` / `libfontmanager` / … from the
-OpenJDK 8 C sources, which are not committed here. The IcedTea 8 harness in
-`vendor/icedtea8` (fetched by `make vendor`) downloads and extracts OpenJDK 8u
-for you — build it per [`vendor/icedtea8/README`](../vendor/icedtea8/README) (a
-standard `./configure && make`); it writes the OpenJDK 8u source tree under
-`build/openjdk8/`. The native build scripts expect that tree at
-`build/openjdk8/jdk-<changeset>`, so set `J=` near the top of
-`tools/build-openjdk-natives.sh` and `tools/build-awt-natives.sh` to match the
-directory the harness creates. (`make vm` and `make clib4` do **not** need this
-step — only the OpenJDK native libraries do.)
+OpenJDK 8 C sources from `vendor/openjdk8` by default. That submodule is the
+preferred source for both Docker and local builds. If you still want to use the
+older IcedTea-generated extracted tree under `build/openjdk8/jdk-<changeset>`,
+set `OPENJDK8_SRC` explicitly before invoking the build scripts or
+`Makefile.local`. (`make vm` and `make clib4` do **not** need this step — only
+the OpenJDK native libraries do.)
 
 ## The VM as a shared library
 

@@ -454,3 +454,19 @@ Java_sun_awt_amiga_AmigaNative_toback0(JNIEnv *env, jclass cls, jlong handle)
     if (win != NULL)
         IIntuition->WindowToBack(win);
 }
+
+/* VM shutdown hook: libjvm calls this before the final process exit so that
+   Intuition windows are closed even when the atexit handler is bypassed
+   (the hard-exit path uses _Exit()).  Registration happens in JNI_OnLoad. */
+extern void registerAmigaAwtCleanup(void (*fn)(void));
+
+static void amiga_awt_pre_exit_cleanup(void)
+{
+    awt_atexit_cleanup();
+}
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    registerAmigaAwtCleanup(amiga_awt_pre_exit_cleanup);
+    return JNI_VERSION_1_4;
+}
