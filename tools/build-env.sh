@@ -70,6 +70,24 @@ apply_openjdk_patch() {
     elif git -C "$OJ_ROOT" apply --reverse --check "$PATCH_FILE" >/dev/null 2>&1; then
         echo "=== OpenJDK patch already applied: $PATCH_FILE ==="
     else
+        # Neither direction applies => the vendored tree is somewhere in between:
+        # partially adapted, so it matches neither the pristine nor the patched
+        # state.  That normally means a sed block in build-openjdk-natives.sh grew
+        # a new edit while its guard ("has this file been touched at all?") was
+        # already satisfied by an earlier run, so the new edit never fired.
+        # Name the files, otherwise this warning says nothing actionable.
         echo "WARN: cannot apply OpenJDK patch cleanly ($PATCH_FILE); continuing with script-side adaptations"
+        echo "WARN:   diverging files (adapted, but not to the state the patch describes):"
+        git -C "$OJ_ROOT" apply --numstat "$PATCH_FILE" 2>/dev/null | cut -f3 | while read -r f; do
+            [ -n "$f" ] || continue
+            awk -v F="$f" 'BEGIN{p=0} /^diff --git /{p=($0 ~ "a/"F"$" || $0 ~ "a/"F" ")} p' \
+                "$PATCH_FILE" > "$OJ_ROOT/.oj-hunk.patch"
+            if ! git -C "$OJ_ROOT" apply --reverse --check .oj-hunk.patch >/dev/null 2>&1; then
+                echo "WARN:     $f"
+            fi
+        done
+        rm -f "$OJ_ROOT/.oj-hunk.patch"
+        echo "WARN:   to resync: restore them (git -C $OJ_ROOT checkout -- <file>) and re-run the build,"
+        echo "WARN:   or apply the missing hunks by hand, then regenerate the patch."
     fi
 }

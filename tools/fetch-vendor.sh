@@ -22,9 +22,46 @@ apply_jamvm_patch_if_needed() {
     elif git -C vendor/jamvm apply --reverse --check "$PATCH_FILE" >/dev/null 2>&1; then
         echo "=== docs/jamvm-amiga-openjdk.patch already applied -- skipping ==="
     else
-        echo "WARNING: docs/jamvm-amiga-openjdk.patch does not apply cleanly to this jamvm checkout."
+        # Neither direction applies.  The usual cause is NOT a corrupt checkout:
+        # it is a tree still carrying an OLDER revision of this same patch.  The
+        # forward check then fails (already patched) and the reverse check fails
+        # too (patched to a different revision), so the old "continue as-is"
+        # branch silently froze vendor/jamvm at whatever patch level it had --
+        # which is how the classpath-separator fix (the amiga_classpath.h include
+        # in src/os/amiga/os.c) went missing while docs/ already carried it.
+        #
+        # That case is provable and repairable: if some historical revision of
+        # this patch reverse-applies exactly, the tree is that revision, and we
+        # can rewind it and re-apply the current one with nothing to lose.
+        for old in $(git log --format=%h -- "$PATCH_FILE" 2>/dev/null); do
+            git show "$old:docs/jamvm-amiga-openjdk.patch" > "vendor/jamvm/.old-patch" 2>/dev/null || continue
+            if git -C vendor/jamvm apply --reverse --check .old-patch >/dev/null 2>&1; then
+                echo "=== vendor/jamvm is at an OLDER revision of the patch ($old) -- resyncing ==="
+                git -C vendor/jamvm apply --reverse .old-patch
+                rm -f vendor/jamvm/.old-patch
+                git -C vendor/jamvm apply "$PATCH_FILE"
+                echo "    rewound to $old and re-applied the current patch"
+                # src/classlib*.h are copies the VM build makes of the chosen
+                # classlib's headers, and "-I ." makes them win over the originals.
+                # Stale copies would shadow the freshly patched ones.
+                rm -f vendor/jamvm/src/classlib.h vendor/jamvm/src/classlib-defs.h \
+                      vendor/jamvm/src/classlib-excep.h vendor/jamvm/src/classlib-symbol.h
+                return 0
+            fi
+        done
+        rm -f vendor/jamvm/.old-patch
+        echo "WARNING: docs/jamvm-amiga-openjdk.patch does not apply cleanly to this jamvm checkout,"
+        echo "         and it matches no previous revision of the patch either."
+        echo "         Diverging files:"
+        git -C vendor/jamvm apply --numstat "$PATCH_FILE" 2>/dev/null | cut -f3 | while read -r f; do
+            [ -n "$f" ] || continue
+            awk -v F="$f" 'BEGIN{p=0} /^diff --git /{p=($0 ~ "a/"F"$" || $0 ~ "a/"F" ")} p' \
+                "$PATCH_FILE" > vendor/jamvm/.hunk.patch
+            git -C vendor/jamvm apply --reverse --check .hunk.patch >/dev/null 2>&1 || echo "           $f"
+        done
+        rm -f vendor/jamvm/.hunk.patch
         echo "         Continuing with vendor/jamvm as-is."
-        echo "         If VM build fails later, reset vendor/jamvm to the expected upstream revision and rerun make vendor."
+        echo "         If the VM build fails later, reset vendor/jamvm to the expected upstream revision and rerun make vendor."
     fi
 }
 

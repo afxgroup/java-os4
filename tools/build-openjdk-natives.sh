@@ -269,13 +269,32 @@ fi
 # prefix; clib4 passes "./X" straight to Lock() which fails.  Strip a leading "./" so
 # File.exists()/loadLibrary() resolve CWD-relative files (e.g. ./libzip.so during
 # System.initializeSystemClass loadLibrary("zip")).  Idempotent.
+#
+# Each edit below is guarded on ITS OWN marker, not on a shared "has this file
+# been touched at all?" test.  A single file-wide guard silently skips any edit
+# added later: the tree already contained amiga_path from an earlier run, so the
+# opendir/remove/mkdir/rename/utimes/statvfs64 group never fired, File.list()
+# kept popping the volume requester, and docs/openjdk8-amiga.patch stopped
+# matching the tree in either direction ("cannot apply OpenJDK patch cleanly").
 UFS="$J/src/solaris/native/java/io/UnixFileSystem_md.c"
-if [ -f "$UFS" ] && ! grep -q "amiga_path" "$UFS"; then
+if [ -f "$UFS" ]; then
+    ufs_adapted=0
     # statMode(): normalise ("./", "/Volume:") -> AmigaDOS form before stat64.
-    perl -0pi -e 's/(statMode\(const char \*path, int \*mode\)\s*\{\n\s*struct stat64 sb;\n)/$1#ifdef __amigaos4__\n    path = amiga_path(path);\n#endif\n/' "$UFS"
+    # NOT idempotent -- the anchor it matches survives the insertion.
+    if ! grep -q 'path = amiga_path(path);' "$UFS"; then
+        perl -0pi -e 's/(statMode\(const char \*path, int \*mode\)\s*\{\n\s*struct stat64 sb;\n)/$1#ifdef __amigaos4__\n    path = amiga_path(path);\n#endif\n/' "$UFS"
+        ufs_adapted=1
+    fi
     # canonicalize0(): return a leading-"/" absolute path so File.toURI()/isAbsolute()
     # don't double the Amiga "Volume:" path (the -classpath/URLClassPath bug).
-    sed -i 's@canonicalize((char \*)path,@amiga_canonicalize((char *)path,@' "$UFS"
+    # NOT idempotent -- the pattern is a substring of its own replacement.
+    if ! grep -q 'amiga_canonicalize' "$UFS"; then
+        sed -i 's@canonicalize((char \*)path,@amiga_canonicalize((char *)path,@' "$UFS"
+        ufs_adapted=1
+    fi
+    # The remaining edits ARE idempotent (no pattern matches its replacement),
+    # so they can just run: a re-run over an adapted file is a no-op.
+    #
     # other stat/access/chmod sites (getLastModified/getLength/checkAccess/setPermission)
     sed -i 's@stat64(path, &sb)@stat64(amiga_path(path), \&sb)@g; s@access(path, mode)@access(amiga_path(path), mode)@g; s@chmod(path, mode)@chmod(amiga_path(path), mode)@g' "$UFS"
     # ...and every REMAINING path-taking call in this file.  Any one that is left
@@ -289,7 +308,9 @@ if [ -f "$UFS" ] && ! grep -q "amiga_path" "$UFS"; then
             s@rename(fromPath, toPath)@amiga_rename(amiga_path(fromPath), amiga_path(toPath))@g;
             s@utimes(path, tv)@utimes(amiga_path(path), tv)@g;
             s@statvfs64(path, &fsstat)@statvfs64(amiga_path(path), \&fsstat)@g' "$UFS"
-    echo "=== adapted UnixFileSystem_md.c (amiga_path/amiga_canonicalize) ==="
+    if [ "$ufs_adapted" = 1 ]; then
+        echo "=== adapted UnixFileSystem_md.c (amiga_path/amiga_canonicalize) ==="
+    fi
 fi
 
 # FileSystemPreferences.c: java.util.prefs writes under user.home -- same story,
