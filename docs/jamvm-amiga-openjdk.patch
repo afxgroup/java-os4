@@ -1,5 +1,5 @@
 diff --git a/src/alloc.c b/src/alloc.c
-index 536c720..784bc4d 100644
+index 536c720..1cb0c57 100644
 --- a/src/alloc.c
 +++ b/src/alloc.c
 @@ -191,6 +191,12 @@ static VMLock registered_refs_lock;
@@ -58,6 +58,23 @@ index 536c720..784bc4d 100644
  int initialiseGC(InitArgs *args) {
      /* Pre-allocate an OutOfMemoryError exception object - we throw it
       * when we're really low on heap space, and can create FA... */
+@@ -2075,8 +2110,14 @@ got_it:
+     Thread *self;                                                             \
+     disableSuspend(self = threadSelf());                                      \
+     lockVMLock(has_fnlzr_lock, self);                                         \
+-    TRACE_FNLZ(("Object @%p type %s has a finalize method...\n",              \
+-                                             ob, CLASS_CB(ob->class)->name)); \
++    /* C99 variadic macro, so NO outer parentheses: with them the whole thing
++       is one comma expression whose value is the last operand, and this
++       degrades to jam_printf(CLASS_CB(ob->class)->name) -- the class name used
++       as the format string, printed bare with no newline.  That is what
++       flooded the serial line with "sun/java2d/SunGraphics2D" on every draw,
++       and it would read junk varargs the day a name contained a '%'. */      \
++    TRACE_FNLZ("Object @%p type %s has a finalize method...\n",               \
++                                              ob, CLASS_CB(ob->class)->name); \
+     if(has_finaliser_count == has_finaliser_size) {                           \
+         has_finaliser_size += LIST_INCREMENT;                                 \
+         has_finaliser_list = sysRealloc(has_finaliser_list,                   \
 diff --git a/src/class.c b/src/class.c
 index af81530..0523294 100644
 --- a/src/class.c
@@ -817,6 +834,24 @@ index 71fc8aa..8a7c303 100644
  }
  
  static sem_t signal_sem;
+diff --git a/src/config.h b/src/config.h
+index dd2b875..08dffc6 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -186,7 +186,12 @@
+ #undef TRACEDLL
+ 
+ /* defined if object finalisation tracing enabled for debugging */
+-#define TRACEFNLZ 1
++/* Left ON by accident, unlike every other trace here.  ADD_FINALIZED_OBJECT
++   fires on each allocation of an object whose class has finalize(), which on
++   AmigaOS meant a serial write per java.awt.Graphics, per ColorModel and per
++   URLConnection -- a line of debug for every single draw, and DebugPrintF to
++   the serial port is not cheap.  See the call site in alloc.c. */
++//#define TRACEFNLZ 1
+ 
+ /* defined if gc tracing enabled for debugging */
+ //#define TRACEGC 0
 diff --git a/src/dll.c b/src/dll.c
 index 3604fcf..654c63c 100644
 --- a/src/dll.c
