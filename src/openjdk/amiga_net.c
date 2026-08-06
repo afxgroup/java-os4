@@ -159,6 +159,25 @@ int NET_Timeout0(int s, long timeout, long currentTime) {
  */
 
 /*
+ * net_util.h declares these two as globals and NetworkInterface.c is what
+ * defines them, so leaving that file out took them with it -- libnet.so shipped
+ * with ni_addrsID / ni_indexID unresolved (package.sh's symbol check is what
+ * caught it).
+ *
+ * They are NOT dead weight to satisfy the linker.  PlainDatagramSocketImpl.c
+ * declares its own file-static shadows at most use sites, but not all: the
+ * plain IPv4 multicast-join path reads ni_addrsID through the global (the local
+ * static beside it lives inside a "#if defined(__linux__) && defined(AF_INET6)"
+ * block we compile out), and the IPv6 mreq path reads ni_indexID the same way.
+ * So MulticastSocket.joinGroup(group, netIf) really does dereference this, and
+ * a NULL jfieldID there is a crash, not a no-op.
+ *
+ * Filled in below from the same class and signatures NetworkInterface.c uses.
+ */
+jfieldID ni_indexID;
+jfieldID ni_addrsID;
+
+/*
  * java.net.NetworkInterface -- "this machine has no enumerable interfaces".
  *
  * These are NOT optional even for a program that never touches
@@ -179,10 +198,27 @@ int NET_Timeout0(int s, long timeout, long currentTime) {
  * (that is what the __linux__ / _ALLBSD_SOURCE halves of NetworkInterface.c do,
  * which is why we do not compile it) -- a separate job from making sockets work.
  */
+/*
+ * Enumeration is stubbed, but the field IDs above are still cached here -- this
+ * is java.net.NetworkInterface's <clinit>, the same point upstream fills them
+ * in, and every caller that reads them already holds a NetworkInterface object,
+ * so the class is initialised by then.
+ */
 JNIEXPORT void JNICALL
 Java_java_net_NetworkInterface_init(JNIEnv *env, jclass cls) {
-    (void)env;
+    jclass ni_class;
+
     (void)cls;
+
+    ni_class = (*env)->FindClass(env, "java/net/NetworkInterface");
+    CHECK_NULL(ni_class);
+    ni_class = (*env)->NewGlobalRef(env, ni_class);
+    CHECK_NULL(ni_class);
+    ni_indexID = (*env)->GetFieldID(env, ni_class, "index", "I");
+    CHECK_NULL(ni_indexID);
+    ni_addrsID = (*env)->GetFieldID(env, ni_class, "addrs",
+                                    "[Ljava/net/InetAddress;");
+    CHECK_NULL(ni_addrsID);
 }
 
 JNIEXPORT jobjectArray JNICALL

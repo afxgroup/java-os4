@@ -965,7 +965,7 @@ done
 # is expected to be missing: it is jni_util.h's, exported by libjava.so, and gets
 # resolved across shared objects at load time like the JNU_* calls.
 echo "  undefined check:"; ppc-amigaos-nm -D -u "$OUT/libnet.so" 2>/dev/null \
-    | awk '{print $2}' | grep -E "^(NET_|enum|getFlags|getMacAddress|getMTU)" \
+    | awk '{print $2}' | grep -E "^(NET_|ni_|enum|getFlags|getMacAddress|getMTU)" \
     | sort -u | sed 's/^/    UNRESOLVED /'
 ppc-amigaos-nm -D --defined-only "$OUT/libjava.so" 2>/dev/null | grep -qw getErrorString \
     || echo "    UNRESOLVED getErrorString (not exported by libjava.so either)"
