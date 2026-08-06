@@ -13,12 +13,12 @@
  *     AmigaOS has no equivalent to deliver, so the wrappers here are the plain
  *     syscalls with the EINTR retry.  The cost is stated in NET_SocketClose().
  *
- *   - getErrorString(), which on Linux/BSD is defined inside NetworkInterface.c
- *     and referenced from PlainDatagramSocketImpl.c.  We do not build
- *     NetworkInterface.c (see the stubs at the bottom), so it is provided here.
- *
  *   - The java.net.NetworkInterface natives, kept as the "no enumerable
- *     interfaces" stubs the port has always used.
+ *     interfaces" stubs the port has always used, plus the ni_addrsID /
+ *     ni_indexID globals that NetworkInterface.c would otherwise define.
+ *
+ *   - One clib4 divergence that upstream cannot see: the accepted socket's
+ *     blocking mode.  See NET_Accept().
  *
  * IPv6: the natives are built with -DDONT_ENABLE_IPV6, which makes
  * net_util_md.c's IPv6_supported() return JNI_FALSE.  net_util.c's JNI_OnLoad
@@ -34,6 +34,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -82,10 +83,54 @@ int NET_SendTo(int s, const void *msg, int len, unsigned int flags,
     return AMIGA_NET_RETRY(sendto(s, msg, len, flags, to, tolen));
 }
 
+/*
+ * Force fd into genuinely blocking mode, whatever clib4 currently believes.
+ *
+ * clib4's fcntl(F_SETFL) only issues file_action_set_blocking when the
+ * requested mode differs from its own FDF_NON_BLOCKING bookkeeping, so a
+ * single "clear O_NONBLOCK" is silently dropped whenever that bookkeeping has
+ * drifted from the socket's real state.  Asking for non-blocking first
+ * guarantees the second call is a transition clib4 will act on.
+ *
+ * Converges on blocking from all four combinations of (real state, believed
+ * state): whichever of the two calls clib4 decides to skip, the other one is a
+ * difference it must act on, and the last action performed is always
+ * set_blocking.
+ */
+static void amiga_force_blocking(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+
+    if (flags < 0) {
+        return;
+    }
+    (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+}
+
+/*
+ * PlainSocketImpl.c's socketCreate() deliberately puts LISTENING sockets into
+ * non-blocking mode (accept is driven by poll through NET_Timeout instead), and
+ * on AmigaOS the accepted socket inherits that mode from its listener.  Upstream
+ * expects exactly this and calls SET_BLOCKING(newfd) right after NET_Accept
+ * returns -- but that macro is fcntl-based, and clib4's accept() registers the
+ * new descriptor with FDF_IN_USE|FDF_IS_SOCKET|FDF_READ|FDF_WRITE without ever
+ * recording FDF_NON_BLOCKING.  clib4 therefore thinks the accepted socket is
+ * already blocking, skips the change, and the socket stays non-blocking for
+ * real: the first read on an accepted connection returns EAGAIN and java.net
+ * reports "SocketException: Resource temporarily unavailable (Read failed)".
+ *
+ * Client sockets never hit this, which is why only the server side broke:
+ * they are only made non-blocking transiently by connect-with-timeout, where
+ * both transitions are ones clib4 sees and performs.
+ */
 int NET_Accept(int s, struct sockaddr *addr, int *addrlen) {
     socklen_t socklen = (socklen_t)*addrlen;
     int ret = AMIGA_NET_RETRY(accept(s, addr, &socklen));
+
     *addrlen = (int)socklen;
+    if (ret >= 0) {
+        amiga_force_blocking(ret);
+    }
     return ret;
 }
 
