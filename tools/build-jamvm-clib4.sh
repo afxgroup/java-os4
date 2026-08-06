@@ -45,7 +45,7 @@ for h in classlib.h classlib-defs.h classlib-excep.h classlib-symbol.h; do
     cp -f "classlib/gnuclasspath/$h" "$h"
 done
 
-INC="-I . -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib/gnuclasspath"
+INC="-I . -I $PROJECT_ROOT/src/jamvm -I $PROJECT_ROOT/src/openjdk -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib/gnuclasspath"
 # -DUSE_ZIP enables the real zip reader in zip.c (needed to read glibj.zip /
 # jamvmclasses.zip on the boot classpath); otherwise a NULL stub is compiled.
 # -DSHARED_CHAR_BUFFERS: REQUIRED for the gnuclasspath classlib (configure.ac sets

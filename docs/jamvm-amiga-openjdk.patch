@@ -59,26 +59,10 @@ index 536c720..784bc4d 100644
      /* Pre-allocate an OutOfMemoryError exception object - we throw it
       * when we're really low on heap space, and can create FA... */
 diff --git a/src/class.c b/src/class.c
-index af81530..aed45ac 100644
+index af81530..0523294 100644
 --- a/src/class.c
 +++ b/src/class.c
-@@ -40,6 +40,15 @@
- #include "excep.h"
- #include "classlib.h"
- 
-+#ifdef __amigaos4__
-+#include <proto/exec.h>
-+#define CP_SEP_CHAR ';'
-+#define CP_SEP_STR ";"
-+#else
-+#define CP_SEP_CHAR ':'
-+#define CP_SEP_STR ":"
-+#endif
-+
- #define PREPARE(ptr) ptr
- #define SCAVENGE(ptr) FALSE
- #define FOUND(ptr1, ptr2) ptr2
-@@ -260,6 +269,27 @@ Class *parseClass(char *classname, char *data, int offset, int len,
+@@ -260,6 +260,27 @@ Class *parseClass(char *classname, char *data, int offset, int len,
      READ_U2(minor_version, ptr, len);
      READ_U2(major_version, ptr, len);
  
@@ -106,11 +90,21 @@ index af81530..aed45ac 100644
      if((class = allocClass()) == NULL)
          return NULL;
  
-@@ -1550,7 +1580,51 @@ Class *initClass(Class *class) {
+@@ -1480,6 +1501,10 @@ unlock:
+    objectUnlock(class);
+ }
+ 
++#ifdef __amigaos4__
++#include <proto/exec.h>
++#endif
++
+ Class *initClass(Class *class) {
+    ClassBlock *cb = CLASS_CB(class);
+    ConstantPool *cp = &cb->constant_pool;
+@@ -1549,8 +1574,51 @@ Class *initClass(Class *class) {
+ 
     if((excep = exceptionOccurred())) {
         Class *error;
- 
--       clearException(); 
 +#ifdef __amigaos4__
 +       {
 +           /* detailMessage/vmState are inherited from java.lang.Throwable, so use
@@ -128,7 +122,8 @@ index af81530..aed45ac 100644
 +           } else
 +               DebugPrintF("[CLINIT] %s <clinit> threw %s (no message)\n",
 +                           CLASS_CB(class)->name, CLASS_CB(excep->class)->name);
-+
+ 
+-       clearException(); 
 +           /* Dump the stack trace: Throwable.vmState (VMThrowable) -> backtrace,
 +              an int[] of (MethodBlock*, pc) pairs (see classlib .../excep.c). */
 +           {
@@ -159,89 +154,174 @@ index af81530..aed45ac 100644
  
         /* Don't wrap exceptions of type java.lang.Error... */
         error = findSystemClass0(SYMBOL(java_lang_Error));
-@@ -2144,7 +2218,7 @@ void parseBootClassPath() {
+@@ -1592,6 +1660,10 @@ char *findFileEntry(char *path, int *file_len) {
+     char *data;
+     FILE *fd;
+ 
++#ifdef __amigaos4__
++    path = (char*)amigaPath(path);
++#endif
++
+     if((fd = fopen(path, "r")) == NULL)
+         return NULL;
+ 
+@@ -2135,21 +2207,38 @@ void freeClassLoaderData(Object *class_loader) {
+     }
+ }
+ 
++#ifdef __amigaos4__
++#include <proto/exec.h>
++
++/* ':' is the AmigaDOS volume separator as well as the path-list separator
++   everyone types, so deciding where one entry ends is not a character test --
++   see amigaIsPathListSep() in os/amiga/classpath.c. */
++#define IS_PATH_LIST_SEP(list, start, i, seen_vol) \
++            amigaIsPathListSep(list, start, i, seen_vol)
++#else
++#define IS_PATH_LIST_SEP(list, start, i, seen_vol) ((list)[i] == ':')
++#endif
++
+ void parseBootClassPath() {
+     char *cp, *pntr, *start;
+     int i, j, len, max = 0;
++    int seen_vol = FALSE;
+     struct stat info;
+ 
+     cp = sysMalloc(strlen(bootpath)+1);
      strcpy(cp, bootpath);
++#ifdef __amigaos4__
++    DebugPrintF("[BCP] bootpath='%s'\n", bootpath);
++#endif
  
      for(i = 0, start = pntr = cp; *pntr; pntr++) {
 -        if(*pntr == ':') {
-+        if(*pntr == CP_SEP_CHAR) {
++        if(IS_PATH_LIST_SEP(cp, start - cp, pntr - cp, &seen_vol)) {
              if(start != pntr) {
                  *pntr = '\0';
                  i++;
-@@ -2158,7 +2232,7 @@ void parseBootClassPath() {
+             }
+             start = pntr+1;
++            seen_vol = FALSE;
+         }
+     }
+     if(start != pntr)
+@@ -2158,32 +2247,113 @@ void parseBootClassPath() {
      bootclasspath = sysMalloc(sizeof(BCPEntry)*i);
  
      for(j = 0, pntr = cp; i > 0; i--) {
--        while(*pntr == ':')
-+        while(*pntr == CP_SEP_CHAR)
++#ifdef __amigaos4__
++        while(*pntr == ':' || *pntr == ';')
++#else
+         while(*pntr == ':')
++#endif
              pntr++;
  
          start = pntr;
-@@ -2170,14 +2244,26 @@ void parseBootClassPath() {
+         pntr += (len = strlen(pntr))+1;
+ 
+-        if(stat(start, &info) == 0) {
++      {
++#ifdef __amigaos4__
++        int _sr = stat(amigaPath(start), &info);
++        DebugPrintF("[BCP] entry='%s' stat=%d\n", start, _sr);
++#else
++        int _sr = stat(start, &info);
++#endif
++        if(_sr == 0) {
+             if(S_ISDIR(info.st_mode)) {
+                 bootclasspath[j].zip = NULL;
                  if(len > max)
                      max = len;
              } else
 -                if((bootclasspath[j].zip = processArchive(start)) == NULL)
 +                if((bootclasspath[j].zip = processArchive(start)) == NULL) {
-+                    if(getenv("JAMVM_TRACE_STARTUP") != NULL)
-+                        jam_fprintf(stderr, "[jamvm] bootclasspath: cannot open archive: %s\n", start);
++#ifdef __amigaos4__
++                    DebugPrintF("[BCP] processArchive FAILED '%s'\n", start);
++#endif
                      continue;
 +                }
              bootclasspath[j++].path = start;
--        }
-+        } else if(getenv("JAMVM_TRACE_STARTUP") != NULL)
-+            jam_fprintf(stderr, "[jamvm] bootclasspath: skipping missing entry: %s\n", start);
+         }
++      }
      }
  
      max_cp_element_len = max;
      bcp_entries = j;
-+
-+    if(getenv("JAMVM_TRACE_STARTUP") != NULL)
-+        jam_fprintf(stderr, "[jamvm] bootclasspath=%s (%d entries)\n", bootpath, j);
-+
-+    if(j == 0)
-+        jam_fprintf(stderr, "Error: no valid boot classpath entries "
-+                            "(boot classpath: %s).  Is JAVA: assigned and "
-+                            "rt.jar present?\n", bootpath);
  }
  
++#ifdef __amigaos4__
++/* Build the Java-facing value of the "sun.boot.class.path" property from the
++   C-level boot path.  Two things have to change on the way out:
++
++     - the separator.  path.separator is ';' on AmigaOS (':' is the volume
++       separator), and sun.misc.Launcher.getBootstrapClassPath() splits this
++       property on File.pathSeparator.  Hand it a ':'-joined list and Java reads
++       the whole thing as ONE entry whose leading "niopatch.zip:" AmigaDOS takes
++       for a missing volume -- the "Please insert volume niopatch.zip" requester,
++       after which every getBootstrapResource() fails.  (That is what used to
++       break sun.reflect.misc.MethodUtil: unable to read Trampoline.class through
++       the boot URLClassPath, loadClass fell through to the bootstrap loader,
++       which defined it with the null loader, and Trampoline's initialiser threw
++       "must not be defined by the bootstrap class loader".)
++
++     - the leading '/'.  java.io.File and sun.nio.fs only treat a path as
++       absolute when it starts with one; amigaPath() strips it again at the
++       native chokepoints.
++
++   Entries arrive already java.home-absolute (classlibDefaultBootClassPath), so
++   this only re-spells them.  Separate string: it does NOT touch the global
++   bootpath the VM's own class search uses. */
++char *amigaBootClassPathProperty(void) {
++    char *bcp = getBootClassPath();
++    char *out;
++    int n, len = 0, start, seen_vol = FALSE, i;
++
++    if(bcp == NULL)
++        return NULL;
++
++    n = strlen(bcp);
++    out = sysMalloc(n * 2 + 2);       /* worst case: a '/' added per entry */
++
++    for(start = 0, i = 0; i <= n; i++) {
++        if(i != n && !amigaIsPathListSep(bcp, start, i, &seen_vol))
++            continue;
++
++        if(i != start) {
++            if(len != 0)
++                out[len++] = ';';
++            if(bcp[start] != '/')
++                out[len++] = '/';
++            memcpy(out + len, &bcp[start], i - start);
++            len += i - start;
++        }
++
++        start = i + 1;
++        seen_vol = FALSE;
++    }
++
++    out[len] = '\0';
++    return out;
++}
++#endif
++
  void setClassPath(InitArgs *args) {
-@@ -2217,7 +2303,7 @@ void scanDirForJars(char *dir) {
-             buff = sysMalloc(bootpathlen);
+     char *env;
+-    classpath = args->classpath ? args->classpath : 
++#ifdef __amigaos4__
++    /* Rewrite the -cp: ':' or ';' separated, wildcards expanded, entries made
++       launch-anchored absolute Unix paths -- see os/amiga/classpath.c.  Empty
++       when none given (on AmigaOS "." canonicalises to a volume path the
++       URLClassPath mis-handles). */
++    char *raw = args->classpath ? args->classpath :
++                 ((env = getenv("CLASSPATH")) ? env : NULL);
++    classpath = raw != NULL ? amigaClassPath(raw) : "";
++#else
++    classpath = args->classpath ? args->classpath :
+                  ((env = getenv("CLASSPATH")) ? env : ".");
++#endif
+ }
  
-             strcat(strcat(strcat(strcat(strcpy(buff, dir), "/"),
--                                 namelist[n]->d_name), ":"), bootpath);
-+                                 namelist[n]->d_name), CP_SEP_STR), bootpath);
- 
-             sysFree(bootpath);
-             bootpath = buff;
-@@ -2233,7 +2319,7 @@ void scanDirsForJars(char *directories) {
- 
-     strcpy(dirs, directories);
-     for(end = pntr = &dirs[dirslen]; pntr != dirs; pntr--) {
--        if(*pntr == ':') {
-+        if(*pntr == CP_SEP_CHAR) {
-             char *start = pntr + 1;
-             if(start != end)
-                 scanDirForJars(start);
-@@ -2270,7 +2356,7 @@ void setBootClassPath(InitArgs *args) {
- 
-     if(args->bootpath_a != NULL) {
-         bootpath = sysMalloc(strlen(path) + strlen(args->bootpath_a) + 2);
--        strcat(strcat(strcpy(bootpath, path), ":"), args->bootpath_a);
-+        strcat(strcat(strcpy(bootpath, path), CP_SEP_STR), args->bootpath_a);
-     } else
-         bootpath = strcpy(sysMalloc(strlen(path) + 1), path);
- 
-@@ -2278,7 +2364,7 @@ void setBootClassPath(InitArgs *args) {
- 
-     if(args->bootpath_p != NULL) {
-         path = sysMalloc(strlen(bootpath) + strlen(args->bootpath_p) + 2);
--        strcat(strcat(strcpy(path, args->bootpath_p), ":"), bootpath);
-+        strcat(strcat(strcpy(path, args->bootpath_p), CP_SEP_STR), bootpath);
-         sysFree(bootpath);
-         bootpath = path;
-     }
+ char *getClassPath() {
 diff --git a/src/classlib/gnuclasspath/natives.c b/src/classlib/gnuclasspath/natives.c
 index ca95e00..f99f293 100644
 --- a/src/classlib/gnuclasspath/natives.c
@@ -258,49 +338,35 @@ index ca95e00..f99f293 100644
  
  int classlibInitialiseNatives() {
 diff --git a/src/classlib/openjdk/class.c b/src/classlib/openjdk/class.c
-index 3206ed0..818dc4d 100644
+index 3206ed0..c22e5f7 100644
 --- a/src/classlib/openjdk/class.c
 +++ b/src/classlib/openjdk/class.c
-@@ -26,6 +26,34 @@
- #include "excep.h"
- #include "symbol.h"
- 
-+#ifdef __amigaos4__
-+#define CP_SEP_STR ";"
-+#else
-+#define CP_SEP_STR ":"
-+#endif
-+
-+static char *defaultJavaHome() {
-+    char *java_home = getJavaHome();
-+
-+    if(java_home == NULL || *java_home == '\0')
-+        java_home = classlibDefaultJavaHome();
-+
-+    return java_home;
-+}
-+
-+static const char *javaHomeSep(const char *java_home) {
-+    size_t len;
-+
-+    if(java_home == NULL)
-+        return "/";
-+
-+    len = strlen(java_home);
-+    if(len > 0 && java_home[len - 1] == ':')
-+        return "";
-+
-+    return "/";
-+}
-+
- /* Cached offset of classes field in java.lang.ClassLoader objects */
- int ldr_classes_offset;
- int ldr_parent_offset;
-@@ -118,6 +146,34 @@ Object *classlibSkipReflectionLoader(Object *loader) {
+@@ -117,6 +117,60 @@ Object *classlibSkipReflectionLoader(Object *loader) {
+     return loader;
  }
  
- char *classlibDefaultBootClassPath() {
 +#ifdef __amigaos4__
++/* Amiga runtime layout is FLAT (jars beside the VM) and JamVM's boot-classpath
++   parser splits on ':' which collides with "Volume:" -- so the default is a
++   RELATIVE flat list (no volume colons), resolved against the CWD, which the
++   standard launch sets to the install dir.  niopatch.zip FIRST: it prepends the
++   patched sun.nio.fs.DefaultFileSystemProvider needed for -classpath. */
++/* The Amiga runtime layout is FLAT -- the boot jars sit beside the VM, not in a
++   Unix <java.home>/lib tree.  Entries are java.home-ABSOLUTE and ';'-separated:
++   they used to be bare relative names resolved against the current directory,
++   which forced the VM to chdir into its own install drawer at startup, and that
++   in turn made every relative path an application handed to a native call
++   resolve in the WRONG place -- e.g. new ZipFile("Invoicex.jar") looked in JAVA:
++   instead of the drawer the user ran java from, because java.util.zip passes
++   File.getPath() (not getAbsolutePath()) straight to open().  With the boot path
++   absolute the chdir is gone and the process cwd stays where the user is.
++
++   ';' rather than ':' as the separator: parseBootClassPath() resolves ':'
++   volume-aware (amigaIsPathListSep), so ':' would work too, but the entries here
++   all carry a volume and ';' leaves nothing to infer.  This is the C-level path,
++   in plain AmigaDOS form; amigaBootClassPathProperty() derives the Java-facing
++   sun.boot.class.path from it. */
++char *classlibDefaultBootClassPath() {
 +    static char *entries[] = {"niopatch.zip",
 +                              "resources.jar",
 +                              "rt.jar",
@@ -311,87 +377,111 @@ index 3206ed0..818dc4d 100644
 +                              "amigatoolkit.zip",
 +                              "classes",
 +                              NULL};
-+    char *java_home = defaultJavaHome();
-+    const char *sep = javaHomeSep(java_home);
++    char *java_home = getJavaHome();
++    const char *sep;
 +    char *path, *pntr;
-+    int i, j, len = 0;
++    int i, len = 0;
++
++    if(java_home == NULL)
++        java_home = "";
++    /* "Volume:" IS the directory -- a '/' after it means its PARENT */
++    sep = (*java_home != '\0' && java_home[strlen(java_home) - 1] != ':') ? "/" : "";
 +
 +    for(i = 0; entries[i] != NULL; i++)
-+        len += strlen(entries[i]);
++        len += strlen(java_home) + strlen(sep) + strlen(entries[i]) + 1;
 +
-+    pntr = path = sysMalloc(len + i * (strlen(java_home) + strlen(sep) + 1));
++    pntr = path = sysMalloc(len + 1);
 +
-+    for(j = 0; j < i - 1; j++)
-+        pntr += sprintf(pntr, "%s%s%s%s", java_home, sep, entries[j], CP_SEP_STR);
-+
-+    sprintf(pntr, "%s%s%s", java_home, sep, entries[j]);
++    for(i = 0; entries[i] != NULL; i++)
++        pntr += sprintf(pntr, "%s%s%s%s", i != 0 ? ";" : "",
++                        java_home, sep, entries[i]);
 +
 +    return path;
++}
 +#else
+ char *classlibDefaultBootClassPath() {
      static char *entries[] = {"lib/resources.jar",
                                "lib/rt.jar",
-                               "lib/sunrsasign.jar",
-@@ -126,7 +182,8 @@ char *classlibDefaultBootClassPath() {
-                               "lib/charsets.jar",
-                               "classes",
-                               NULL};
--    char *java_home = getJavaHome();
-+    char *java_home = defaultJavaHome();
-+    const char *sep = javaHomeSep(java_home);
+@@ -130,6 +184,10 @@ char *classlibDefaultBootClassPath() {
      char *path, *pntr;
      int i, j, len = 0;
  
-@@ -136,31 +193,37 @@ char *classlibDefaultBootClassPath() {
-     if(i == 0)
-         return "";
- 
--    pntr = path = sysMalloc(len + i * (strlen(java_home) + 2));
-+    pntr = path = sysMalloc(len + i * (strlen(java_home) + strlen(sep) + 1));
- 
-     for(j = 0; j < i - 1; j++)
--        pntr += sprintf(pntr, "%s/%s:", java_home, entries[j]);
-+        pntr += sprintf(pntr, "%s%s%s%s", java_home, sep, entries[j], CP_SEP_STR);
- 
--    sprintf(pntr, "%s/%s", java_home, entries[j]);
-+    sprintf(pntr, "%s%s%s", java_home, sep, entries[j]);
-     
-     return path;
-+#endif
- }
- 
- char *classlibDefaultExtDirs() {
--    char *java_home = getJavaHome();
--    char *ext_dirs = sysMalloc(strlen(java_home) + 
--                               sizeof("/lib/ext:/usr/java/packages/lib/ext"));
--
--    return strcat(strcpy(ext_dirs, java_home),
--                  "/lib/ext:/usr/java/packages/lib/ext");
-+    char *java_home = defaultJavaHome();
-+    const char *sep = javaHomeSep(java_home);
-+    char *ext_dirs = sysMalloc(strlen(java_home) + strlen(sep) +
-+                       sizeof("lib/ext") + sizeof(CP_SEP_STR) +
-+                       sizeof("/usr/java/packages/lib/ext"));
++    /* Pre-init (java -version), getJavaHome() is NULL -- avoid sprintf("%s",NULL). */
++    if(java_home == NULL)
++        return NULL;
 +
-+        sprintf(ext_dirs, "%s%slib/ext%s/usr/java/packages/lib/ext",
-+            java_home, sep, CP_SEP_STR);
-+    return ext_dirs;
- }
+     for(i = 0; entries[i] != NULL; i++)
+         len += strlen(entries[i]);
  
+@@ -142,19 +200,58 @@ char *classlibDefaultBootClassPath() {
+         pntr += sprintf(pntr, "%s/%s:", java_home, entries[j]);
+ 
+     sprintf(pntr, "%s/%s", java_home, entries[j]);
+-    
++
+     return path;
+ }
++#endif
++
++#ifdef __amigaos4__
++/* "/<java.home>/<tail>": java.home is an AmigaDOS path ("SYS:Java") and the
++   leading '/' is Java's absolute marker, stripped again by amigaPath() at the
++   native chokepoints.  "Volume:" IS the directory, so no '/' follows a trailing
++   ':'.  These lists used to be relative (resolved against user.dir = the install
++   drawer); now that user.dir is the directory the user ran `java` from they must
++   be absolute.  The embedded ':' is safe: path.separator is ';' on AmigaOS. */
++char *amigaJavaHomePath(const char *tail) {
++    char *home = getJavaHome();
++    int hlen, tlen = strlen(tail);
++    char *out;
++
++    if(home == NULL)
++        home = "";
++    hlen = strlen(home);
++
++    out = sysMalloc(hlen + tlen + 3);
++    out[0] = '/';
++    memcpy(out + 1, home, hlen);
++    hlen++;
++
++    if(tlen != 0 && hlen > 1 && out[hlen - 1] != ':')
++        out[hlen++] = '/';
++    strcpy(out + hlen, tail);
++
++    return out;
++}
+ 
++char *classlibDefaultExtDirs() {
++    return amigaJavaHomePath("lib/ext");
++}
++#else
+ char *classlibDefaultExtDirs() {
+     char *java_home = getJavaHome();
+-    char *ext_dirs = sysMalloc(strlen(java_home) + 
++    char *ext_dirs = sysMalloc(strlen(java_home) +
+                                sizeof("/lib/ext:/usr/java/packages/lib/ext"));
+ 
+     return strcat(strcpy(ext_dirs, java_home),
+                   "/lib/ext:/usr/java/packages/lib/ext");
+ }
++#endif
+ 
++#ifdef __amigaos4__
++char *classlibDefaultEndorsedDirs() {
++    return amigaJavaHomePath("lib/endorsed");
++}
++#else
  char *classlibDefaultEndorsedDirs() {
--    char *java_home = getJavaHome();
--    char *endorsed_dirs = sysMalloc(strlen(java_home) +
--                                    sizeof("/lib/endorsed"));
-+    char *java_home = defaultJavaHome();
-+    const char *sep = javaHomeSep(java_home);
-+    char *endorsed_dirs = sysMalloc(strlen(java_home) + strlen(sep) +
-+                                    sizeof("lib/endorsed"));
+     char *java_home = getJavaHome();
+     char *endorsed_dirs = sysMalloc(strlen(java_home) +
+@@ -162,6 +259,7 @@ char *classlibDefaultEndorsedDirs() {
  
--    return strcat(strcpy(endorsed_dirs, java_home), "/lib/endorsed");
-+    sprintf(endorsed_dirs, "%s%slib/endorsed", java_home, sep);
-+    return endorsed_dirs;
+     return strcat(strcpy(endorsed_dirs, java_home), "/lib/endorsed");
  }
++#endif
  
  char *classlibExternalClassName(Class *class) {
+     ClassBlock *cb = CLASS_CB(class);
 diff --git a/src/classlib/openjdk/classlib-defs.h b/src/classlib/openjdk/classlib-defs.h
 index 5433ff3..a8f7048 100644
 --- a/src/classlib/openjdk/classlib-defs.h
@@ -437,7 +527,7 @@ index 5433ff3..a8f7048 100644
      action(cb, signers, ## __VA_ARGS__)
  
 diff --git a/src/classlib/openjdk/classlib.h b/src/classlib/openjdk/classlib.h
-index 054afe4..c490688 100644
+index 054afe4..d682e3b 100644
 --- a/src/classlib/openjdk/classlib.h
 +++ b/src/classlib/openjdk/classlib.h
 @@ -35,7 +35,12 @@ extern Object *classlibMarkThreadTerminated(Object *jThread);
@@ -453,7 +543,7 @@ index 054afe4..c490688 100644
  #define classlibRemoveThreadName() SYMBOL(removeThreadName)
  #define classlibExceptionHandlerName() SYMBOL(uncaughtExceptionHandler)
  
-@@ -109,8 +114,23 @@ extern Object *classlibCheckIfOnLoad(Frame *last);
+@@ -109,8 +114,28 @@ extern Object *classlibCheckIfOnLoad(Frame *last);
  
  /* Properties */
  
@@ -469,6 +559,11 @@ index 054afe4..c490688 100644
 +                    "sun.awt.amiga.AmigaToolkit"); \
 +        setProperty(properties, "java.awt.graphicsenv", \
 +                    "sun.awt.amiga.AmigaGraphicsEnvironment"); \
++        setProperty(properties, "sun.java2d.renderer", \
++                    "sun.java2d.marlin.MarlinRenderingEngine"); \
++        setProperty(properties, "awt.useSystemAAFontSettings", "on"); \
++        setProperty(properties, "swing.aatext", "true"); \
++        setProperty(properties, "sun.java2d.pmoffscreen", "false"); \
 +    } while(0)
 +#else
  #define classlibAddDefaultProperties(properties) \
@@ -478,246 +573,200 @@ index 054afe4..c490688 100644
  extern char *classlibDefaultJavaHome();
  
 diff --git a/src/classlib/openjdk/dll.c b/src/classlib/openjdk/dll.c
-index 1d9cc9c..7b0793f 100644
+index 1d9cc9c..c05537e 100644
 --- a/src/classlib/openjdk/dll.c
 +++ b/src/classlib/openjdk/dll.c
-@@ -23,8 +23,23 @@
- #include "jam.h"
- #include "symbol.h"
- 
-+extern char *classlibDefaultJavaHome();
-+
- static MethodBlock *findNative_mb;
- 
-+static const char *javaHomeSep(const char *java_home) {
-+    size_t len;
-+
-+    if(java_home == NULL)
-+        return "/";
-+
-+    len = strlen(java_home);
-+    if(len > 0 && java_home[len - 1] == ':')
-+        return "";
-+
-+    return "/";
-+}
-+
- int classlibInitialiseDll() {
-     Class *ldr_class = findSystemClass0(SYMBOL(java_lang_ClassLoader));
- 
-@@ -42,10 +57,34 @@ int classlibInitialiseDll() {
+@@ -41,12 +41,35 @@ int classlibInitialiseDll() {
+     return TRUE;
  }
  
- char *classlibDefaultBootDllPath() {
 +#ifdef __amigaos4__
++/* The native .so files live beside the VM (flat layout), so the boot library
++   path is just java.home, absolute: "/SYS:Java".  It used to be "." -- resolved
++   by java.lang.ClassLoader against user.dir, which had to be forced to the
++   install drawer for it to work.  user.dir is now the directory the user ran
++   `java` from (so an application's own relative paths behave), hence the boot
++   library path has to stand on its own.  The embedded volume ':' is safe:
++   path.separator is ';' on AmigaOS, and amigaPath() strips the leading '/'
++   before dlopen. */
++char *classlibDefaultBootDllPath() {
++    extern char *amigaJavaHomePath(const char *tail);
++
++    return amigaJavaHomePath("");
++}
++#else
+ char *classlibDefaultBootDllPath() {
      char *java_home = getJavaHome();
 -    char *dll_path = sysMalloc(strlen(java_home) + sizeof("/lib/"OS_ARCH));
- 
--    return strcat(strcpy(dll_path, java_home), "/lib/"OS_ARCH);
-+    if(java_home == NULL || *java_home == '\0')
-+        java_home = classlibDefaultJavaHome();
-+
-+    /* The OpenJDK natives live flat in the runtime root (JAVA:) and need
-+       PROGDIR:Sobjs next to them for the clib4 sobjs.  The boot dll path
-+       must be a single directory (classlibInitialiseNatives concatenates
-+       it with the lib name), so return java.home as-is. */
-+    {
-+        char *dll_path = sysMalloc(strlen(java_home) + 1);
-+        strcpy(dll_path, java_home);
-+        return dll_path;
-+    }
-+#else
-+    char *java_home = getJavaHome();
-+    const char *sep;
 +    char *dll_path;
 +
-+    if(java_home == NULL || *java_home == '\0')
-+        java_home = classlibDefaultJavaHome();
-+
-+    sep = javaHomeSep(java_home);
-+    dll_path = sysMalloc(strlen(java_home) + strlen(sep) + sizeof("lib/"OS_ARCH));
-+
-+    return strcat(strcat(strcpy(dll_path, java_home), sep), "lib/"OS_ARCH);
-+#endif
++    /* java.home is only set during initVM; showVersionAndCopyright() (java
++       -version) calls this pre-init, when getJavaHome() returns NULL.  Return
++       NULL rather than strlen(NULL)-crashing -- the caller handles it. */
++    if(java_home == NULL)
++        return NULL;
+ 
++    dll_path = sysMalloc(strlen(java_home) + sizeof("/lib/"OS_ARCH));
+     return strcat(strcpy(dll_path, java_home), "/lib/"OS_ARCH);
  }
++#endif
  
  void *classlibLookupLoadedDlls(char *name, Object *loader) {
+     Object *name_string;
 diff --git a/src/classlib/openjdk/jvm.c b/src/classlib/openjdk/jvm.c
-index 971ac75..9825862 100644
+index 971ac75..63a5373 100644
 --- a/src/classlib/openjdk/jvm.c
 +++ b/src/classlib/openjdk/jvm.c
-@@ -21,6 +21,10 @@
- 
- #include "config.h"
- 
-+#ifdef __amigaos4__
-+#include <proto/exec.h>
-+#endif
-+
- #define BSD_COMP
- #define _FILE_OFFSET_BITS 64
- #include <sys/types.h>
-@@ -1535,6 +1539,23 @@ jint JVM_Open(const char *fname, jint flags, jint mode) {
- 
-     TRACE("JVM_Open(fname=%s, flags=%d, mode=%d)", fname, flags, mode);
- 
-+#ifdef __amigaos4__
-+    /* java.io presents canonical paths as Unix-absolute ("/Volume:dir/...") so
-+       File.toURI()/isAbsolute() behave; strip the leading '/' for volume paths
-+       (and a leading "./") so clib4/AmigaDOS open() gets a real path.  Central
-+       fix: ZipFile/JarFile and friends open via JVM_Open. */
-+    {
-+        const char *orig = fname;
-+        if(fname[0] == '.' && fname[1] == '/')
-+            fname += 2;
-+        else if(fname[0] == '/') {
-+            const char *c = fname + 1;
-+            while(*c && *c != '/') { if(*c == ':') { fname++; break; } c++; }
-+        }
-+        DebugPrintF("[JVM_Open] '%s' -> '%s'\n", orig, fname);
-+    }
-+#endif
-+
-     /* O_DELETE is a special classlib flag which indicates that
-        the file should be deleted after opening.  As it is not a
-        standard flag we must remove it (it also conflicts with
-@@ -2475,6 +2496,76 @@ void *JVM_FindLibraryEntry(void* handle, const char* name) {
+@@ -1525,6 +1525,75 @@ jboolean JVM_IsSameClassPackage(JNIEnv *env, jclass class1, jclass class2) {
  }
  
  
-+/* JVM_GetResourceLookupCacheURLs */
++/* JVM_CopySwapMemory -- backs java.nio.Bits.copySwapMemory0, which the
++   ByteBuffer bulk get/put of short/int/long arrays uses whenever the buffer's
++   byte order differs from the platform's.  JamVM never defined it, so libjava.so
++   carried an unresolved reference; the AmigaOS ELF loader binds lazily, which
++   means that did not break the build or startup -- it would have killed the
++   process the first time such a buffer was used.
 +
-+jobjectArray JVM_GetResourceLookupCacheURLs(JNIEnv *env, jobject loader) {
-+    TRACE("JVM_GetResourceLookupCacheURLs(env=%p, loader=%p)", env, loader);
++   Object+offset pairs are resolved exactly as Unsafe does here (base pointer
++   plus raw byte offset, base NULL for an off-heap address) -- see
++   copyMemoryOpenJDK7() in natives.c.  Elements are staged through a local buffer
++   so an in-place swap (src == dst) is safe, and overlapping regions are walked
++   in the direction that memmove would. */
 +
-+    /* Class-data-sharing lookup cache -- absent in JamVM, same as a
-+       HotSpot build without INCLUDE_CDS (the caller handles NULL). */
-+    return NULL;
++static void swapElement(char *dst, const char *src, int size) {
++    char buff[8];
++    int i;
++
++    for(i = 0; i < size; i++)
++        buff[i] = src[size - 1 - i];
++
++    memcpy(dst, buff, size);
 +}
-+
-+
-+/* JVM_GetResourceLookupCache */
-+
-+jintArray JVM_GetResourceLookupCache(JNIEnv *env, jobject loader,
-+                                     const char *resource_name) {
-+    TRACE("JVM_GetResourceLookupCache(env=%p, loader=%p, name=%s)",
-+          env, loader, resource_name);
-+
-+    return NULL;
-+}
-+
-+
-+/* JVM_KnownToNotExist */
-+
-+jboolean JVM_KnownToNotExist(JNIEnv *env, jobject loader,
-+                             const char *classname) {
-+    TRACE("JVM_KnownToNotExist(env=%p, loader=%p, name=%s)",
-+          env, loader, classname);
-+
-+    /* CDS-only query -- always FALSE, same as HotSpot without INCLUDE_CDS. */
-+    return FALSE;
-+}
-+
-+
-+/* JVM_GetTemporaryDirectory */
-+
-+jstring JVM_GetTemporaryDirectory(JNIEnv *env) {
-+    char *tmp_dir = getenv("TMPDIR");
-+
-+    TRACE("JVM_GetTemporaryDirectory(env=%p)", env);
-+
-+    if(tmp_dir == NULL || *tmp_dir == '\0')
-+        tmp_dir = "T:";
-+
-+    return (jstring)createString(tmp_dir);
-+}
-+
-+
-+/* JVM_CopySwapMemory */
 +
 +void JVM_CopySwapMemory(JNIEnv *env, jobject srcObj, jlong srcOffset,
 +                        jobject dstObj, jlong dstOffset, jlong size,
 +                        jlong elemSize) {
++
 +    char *src = (char *)srcObj + srcOffset;
 +    char *dst = (char *)dstObj + dstOffset;
-+    jlong i, j;
++    jlong i;
 +
-+    TRACE("JVM_CopySwapMemory(src=%p, dst=%p, size=%lld, elem=%lld)",
-+          src, dst, size, elemSize);
++    TRACE("JVM_CopySwapMemory(size=%lld, elemSize=%lld)", size, elemSize);
 +
-+    if(size <= 0 || elemSize <= 0 || src == dst)
++    if(elemSize != 2 && elemSize != 4 && elemSize != 8) {
++        signalException(java_lang_IllegalArgumentException,
++                        "wrong element size");
 +        return;
++    }
 +
-+    /* Copy element-by-element, reversing byte order within each element */
-+    for(i = 0; i + elemSize <= size; i += elemSize)
-+        for(j = 0; j < elemSize; j++)
-+            dst[i + j] = src[i + elemSize - 1 - j];
++    if(size < 0 || (size % elemSize) != 0) {
++        signalException(java_lang_IllegalArgumentException,
++                        "size must be a multiple of the element size");
++        return;
++    }
++
++    if(dst > src && dst < src + size)
++        for(i = size - elemSize; i >= 0; i -= elemSize)
++            swapElement(dst + i, src + i, (int)elemSize);
++    else
++        for(i = 0; i < size; i += elemSize)
++            swapElement(dst + i, src + i, (int)elemSize);
 +}
 +
 +
- /* JVM_IsNaN */
- 
- jboolean JVM_IsNaN(jdouble d) {
-diff --git a/src/classlib/openjdk/natives.c b/src/classlib/openjdk/natives.c
-index 39beb7a..fc27cd1 100644
---- a/src/classlib/openjdk/natives.c
-+++ b/src/classlib/openjdk/natives.c
-@@ -41,9 +41,16 @@ int classlibInitialiseNatives() {
-     FieldBlock *base_fb = NULL;
-     char *dll_path = getBootDllPath();
-     char *dll_name = getDllName("java");
--    char path[strlen(dll_path) + strlen(dll_name) + 2];
++/* JVM_GetTemporaryDirectory -- sun.misc.VMSupport.getVMTemporaryDirectory().
++   HotSpot returns the OS temp directory, not the java.io.tmpdir property; keep
++   the two in step (see addDefaultProperties() in properties.c). */
++
++jstring JVM_GetTemporaryDirectory(JNIEnv *env) {
++    TRACE("JVM_GetTemporaryDirectory(env=%p)", env);
++
 +#ifdef __amigaos4__
-+    /* AmigaDOS volume names end in ':'; appending '/' would reference the
-+       parent of the volume root (JAVA:/libjava.so is invalid). */
-+    const char *sep = dll_path[strlen(dll_path) - 1] == ':' ? "" : "/";
++    return (jstring)createString("/T:");
 +#else
-+    const char *sep = "/";
++    return (jstring)createString("/tmp");
 +#endif
-+    char path[strlen(dll_path) + strlen(sep) + strlen(dll_name) + 1];
++}
++
++
+ /* JVM_Open */
  
--    strcat(strcat(strcpy(path, dll_path), "/"), dll_name);
-+    strcat(strcat(strcpy(path, dll_path), sep), dll_name);
-     sysFree(dll_name);
+ #define JVM_EEXIST       -100
+@@ -1533,6 +1602,12 @@ jboolean JVM_IsSameClassPackage(JNIEnv *env, jclass class1, jclass class2) {
+ jint JVM_Open(const char *fname, jint flags, jint mode) {
+     int result;
  
-     if(!resolveDll(path, NULL)) {
++#ifdef __amigaos4__
++    /* ZipFile/JarFile and friends open through JVM_Open, so this is the central
++       Java-form -> AmigaDOS-form conversion for the VM's own file access. */
++    fname = amigaPath(fname);
++#endif
++
+     TRACE("JVM_Open(fname=%s, flags=%d, mode=%d)", fname, flags, mode);
+ 
+     /* O_DELETE is a special classlib flag which indicates that
+@@ -3034,7 +3109,28 @@ jint JVM_FindSignal(const char *name) {
+ 
+     TRACE("JVM_FindSignal(name=%s)", name);
+ 
+-    for(i = 0; signals[i].name != NULL && strcmp(signals[i].name, name); i++); 
++    for(i = 0; signals[i].name != NULL && strcmp(signals[i].name, name); i++);
+ 
+     return signals[i].number;
+ }
++
++/* Class-Data-Sharing (CDS) shared class-path lookup cache.  JamVM has no CDS, so
++   report "no cache": getLookupCacheURLs returning NULL makes sun.misc.URLClassPath
++   disable the cache cleanly (URLClassPath.java:322->331).  These JVM_* were missing
++   from the classlib -- libjava.so's sun/misc/URLClassPath.c calls them, so the
++   unresolved symbols crashed sun.misc.Launcher init on AmigaOS. */
++jobjectArray JVM_GetResourceLookupCacheURLs(JNIEnv *env, jobject loader) {
++    TRACE("JVM_GetResourceLookupCacheURLs(loader=%p)", loader);
++    return NULL;
++}
++
++jintArray JVM_GetResourceLookupCache(JNIEnv *env, jobject loader,
++                                     const char *resource_name) {
++    TRACE("JVM_GetResourceLookupCache(loader=%p, name=%s)", loader, resource_name);
++    return NULL;
++}
++
++jboolean JVM_KnownToNotExist(JNIEnv *env, jobject loader, const char *classname) {
++    TRACE("JVM_KnownToNotExist(loader=%p, name=%s)", loader, classname);
++    return JNI_FALSE;
++}
 diff --git a/src/classlib/openjdk/properties.c b/src/classlib/openjdk/properties.c
-index 2391e61..fdac707 100644
+index 2391e61..fc8877e 100644
 --- a/src/classlib/openjdk/properties.c
 +++ b/src/classlib/openjdk/properties.c
-@@ -19,9 +19,49 @@
-  */
- 
+@@ -21,6 +21,44 @@
  #include <string.h>
-+#include <stdlib.h>
  #include "jam.h"
-+#ifdef __amigaos4__
-+#include <proto/exec.h>
-+#endif
  
- char *classlibDefaultJavaHome() {
 +#ifdef __amigaos4__
-+    /* java.home: JAVA_HOME env first (the `java` launcher sets it to JAVA:),
-+       then the VM's program directory (PROGDIR:, e.g. "SYS:Java"), where
-+       libjvm.so + the boot jars all live (flat layout).  Fall back to
-+       deriving it from libjvm.so's own path. */
++/* On AmigaOS the runtime layout is FLAT -- libjvm.so, libjava.so and the boot
++   jars all live in one directory (e.g. SYS:Test/), not the Unix
++   <java.home>/lib/<arch>/<vmtype>/libjvm.so tree.  So java.home is simply the
++   directory containing libjvm.so (strip the trailing filename after the last
++   '/' or ':' volume separator).  Boot class/library paths are supplied
++   explicitly via -Xbootclasspath and -Dsun.boot.library.path, so they don't
++   depend on the (Unix-shaped) java.home/lib/... derivation. */
++char *classlibDefaultJavaHome() {
++    /* java.home = the VM's program directory (PROGDIR:, e.g. "SYS:Java"), where
++       libjvm.so + the boot jars + lib/ all live (flat layout).  Resolve it from
++       PROGDIR: so it is independent of the current dir (the launcher no longer
++       CDs there).  Fall back to deriving it from libjvm.so's own path. */
 +    extern char *amigaProgramDir(void);
-+    const char *java_home = getenv("JAVA_HOME");
-+    char *pd, *path, *pntr, *home;
++    char *pd = amigaProgramDir();
++    char *path, *pntr, *home;
 +
-+    if(java_home != NULL && *java_home != '\0') {
-+        char *h = sysMalloc(strlen(java_home) + 1);
-+        strcpy(h, java_home);
-+        return h;
-+    }
-+
-+    pd = amigaProgramDir();
 +    if(pd != NULL)
 +        return strcpy(sysMalloc(strlen(pd) + 1), pd);
 +
 +    path = nativeJVMPath();
 +    if(path == NULL)
-+        return "JAVA:";
++        return NULL;
 +
 +    pntr = path + strlen(path);
 +    while(pntr > path && pntr[-1] != '/' && pntr[-1] != ':')
@@ -731,66 +780,40 @@ index 2391e61..fdac707 100644
 +    sysFree(path);
 +
 +    return home;
++}
 +#else
+ char *classlibDefaultJavaHome() {
      char *path = nativeJVMPath();
      char *pntr = path + strlen(path);
-     int count = 0;
-@@ -41,5 +81,6 @@ char *classlibDefaultJavaHome() {
-     sysFree(path);
+@@ -42,4 +80,5 @@ char *classlibDefaultJavaHome() {
  
      return home;
-+#endif
  }
++#endif
  
 diff --git a/src/classlib/openjdk/thread.c b/src/classlib/openjdk/thread.c
-index 71fc8aa..0a445c0 100644
+index 71fc8aa..8a7c303 100644
 --- a/src/classlib/openjdk/thread.c
 +++ b/src/classlib/openjdk/thread.c
-@@ -79,8 +79,14 @@ Object *classlibThreadPreInit(Class *thread_class, Class *thrdGrp_class) {
- 
-     if(init_mb_with_name  == NULL || init_mb_no_name  == NULL ||
-        system_grp_init_mb == NULL || main_grp_init_mb == NULL ||
--       thread_status_fb   == NULL || eetop_fb         == NULL)
-+       thread_status_fb   == NULL || eetop_fb         == NULL) {
-+        jam_fprintf(stderr, "[jamvm] threadPreInit: Thread/ThreadGroup layout "
-+                            "mismatch: init(name)=%p init(noname)=%p grpinit()=%p "
-+                            "grpinit(name)=%p threadStatus=%p eetop=%p\n",
-+                            init_mb_with_name, init_mb_no_name, system_grp_init_mb,
-+                            main_grp_init_mb, thread_status_fb, eetop_fb);
-         return NULL;
-+    }
- 
-     CLASS_CB(thread_class)->flags |= JTHREAD;
- 
-@@ -160,14 +166,25 @@ void classlibSetThreadState(Thread *thread, int state) {
+@@ -160,6 +160,13 @@ void classlibSetThreadState(Thread *thread, int state) {
  
  void classlibThreadName2Buff(Object *jThread, char *buffer, int buff_len) {
      Object *name = INST_DATA(jThread, Object*, name_offset);
--    unsigned short *unicode = ARRAY_DATA(name, unsigned short);
--    int i, len = ARRAY_LEN(name) < buff_len ? ARRAY_LEN(name)
--                                            : buff_len - 1;
- 
--    for(i = 0; i < len; i++)
--        buffer[i] = unicode[i];
-+    if(name == NULL) {
++#if OPENJDK_VERSION >= 8
++    /* OpenJDK 8: Thread.name is a String, not a char[]. */
++    if(name == NULL)
 +        buffer[0] = '\0';
-+        return;
-+    }
-+
-+    if(CLASS_CB(name->class)->name[0] == '[') {
-+        /* Old OpenJDK layout: name is a char[] */
-+        unsigned short *unicode = ARRAY_DATA(name, unsigned short);
-+        int i, len = ARRAY_LEN(name) < buff_len ? ARRAY_LEN(name)
-+                                                : buff_len - 1;
-+
-+        for(i = 0; i < len; i++)
-+            buffer[i] = unicode[i];
- 
--    buffer[len] = '\0';
-+        buffer[len] = '\0';
-+    } else
-+        /* Newer OpenJDK 8 updates: name is a java.lang.String */
++    else
 +        String2Buff(name, buffer, buff_len);
++#else
+     unsigned short *unicode = ARRAY_DATA(name, unsigned short);
+     int i, len = ARRAY_LEN(name) < buff_len ? ARRAY_LEN(name)
+                                             : buff_len - 1;
+@@ -168,6 +175,7 @@ void classlibThreadName2Buff(Object *jThread, char *buffer, int buff_len) {
+         buffer[i] = unicode[i];
+ 
+     buffer[len] = '\0';
++#endif
  }
  
  static sem_t signal_sem;
@@ -859,7 +882,7 @@ index bf88d59..c663143 100644
          MethodBlock *mb = lookupMethod(excep->class, SYMBOL(printStackTrace),
                                                       SYMBOL(___V));
 diff --git a/src/init.c b/src/init.c
-index 32539cf..ab8664d 100644
+index 32539cf..2f19960 100644
 --- a/src/init.c
 +++ b/src/init.c
 @@ -26,7 +26,8 @@
@@ -872,7 +895,7 @@ index 32539cf..ab8664d 100644
  extern void initialisePlatform();
  
  unsigned long clampHeapLimit(long long limit) {
-@@ -34,6 +35,97 @@ unsigned long clampHeapLimit(long long limit) {
+@@ -34,6 +35,100 @@ unsigned long clampHeapLimit(long long limit) {
      return (unsigned long)MIN(clamp, MAX_MAX_HEAP);
  }
  
@@ -949,28 +972,31 @@ index 32539cf..ab8664d 100644
 +    if(getThreadsCount() > target_threads)
 +        exitDumpRemainingThreads();
 +
-+    if(!main_exit)
++    if(!main_exit) {
++        DebugPrintF("[EXIT] amiga_exit: non-main thread exiting\n");
 +        pthread_exit(NULL);
++    }
 +
-+    /* Close any Intuition windows before the hard exit.  The atexit handler
-+       registered by libamigaawt is bypassed by _Exit(), so invoke its cleanup
-+       directly if the library loaded and registered a callback. */
++    /* Close any Intuition windows before returning to main().  The atexit
++       handler registered by libamigaawt is bypassed if anything later calls
++       _Exit(), so invoke its cleanup directly if the library registered one. */
 +    if(amiga_awt_cleanup_fn != NULL) {
 +        DebugPrintF("[EXIT] amiga_exit: closing AWT windows\n");
 +        amiga_awt_cleanup_fn();
 +    }
 +
-+    /* Amiga-specific hard process teardown: kills remaining Java child tasks
-+       (e.g. stuck EDT) before final _Exit, avoiding clib4 parent-waits-child
-+       deadlocks when threads_count is drained but a child task is still alive. */
-+    realAmigaExit(status);
++    /* Return to the caller (exitVM -> main).  The main thread will then return
++       from main() and let the C runtime perform a clean process exit.  Do NOT
++       call _Exit() or signal/kill child tasks from here: AmigaOS4 requires the
++       executable's main task to drive shutdown. */
++    DebugPrintF("[EXIT] amiga_exit: returning to main (status=%d)\n", status);
 +}
 +#endif
 +
  /* Setup default values for command line args */
  
  void setDefaultInitArgs(InitArgs *args) {
-@@ -65,9 +157,17 @@ void setDefaultInitArgs(InitArgs *args) {
+@@ -65,9 +160,17 @@ void setDefaultInitArgs(InitArgs *args) {
  
      args->props_count = 0;
  
@@ -988,7 +1014,7 @@ index 32539cf..ab8664d 100644
  
  #ifdef INLINING
      args->replication_threshold = 10;
-@@ -89,34 +189,46 @@ int VMInitialising() {
+@@ -89,34 +192,46 @@ int VMInitialising() {
      return VM_initing;
  }
  
@@ -1087,47 +1113,48 @@ index 6a9f7c0..6380ae7 100644
  #endif /* THREADED */
  
 diff --git a/src/jam.c b/src/jam.c
-index 052f84a..d23f824 100644
+index 052f84a..0d4c196 100644
 --- a/src/jam.c
 +++ b/src/jam.c
-@@ -38,6 +38,36 @@
- #define BCP_MESSAGE "<directories separated by :>"
+@@ -32,10 +32,19 @@
+ #include "thread.h"
+ #include "classlib.h"
+ 
++/* On AmigaOS ':' is the volume separator, so path.separator is ';' -- but a
++   ':'-separated list is accepted too and disambiguated per colon (see
++   amigaIsPathListSep in os/amiga/classpath.c).  Say so in the help. */
++#ifdef __amigaos4__
++#define CP_SEPARATORS "; or :"
++#else
++#define CP_SEPARATORS ":"
++#endif
++
+ #ifdef USE_ZIP
+-#define BCP_MESSAGE "<jar/zip files and directories separated by :>"
++#define BCP_MESSAGE "<jar/zip files and directories separated by " CP_SEPARATORS ">"
+ #else
+-#define BCP_MESSAGE "<directories separated by :>"
++#define BCP_MESSAGE "<directories separated by " CP_SEPARATORS ">"
  #endif
  
-+#define MAX_OPT_LEN 128
-+
-+static int optEq(const char *arg, const char *lit) {
-+    size_t lit_len = strlen(lit);
-+    size_t arg_len;
-+
-+    if(arg == NULL)
-+        return FALSE;
-+
-+    arg_len = strnlen(arg, MAX_OPT_LEN + 1);
-+    if(arg_len > MAX_OPT_LEN || arg_len != lit_len)
-+        return FALSE;
-+
-+    return memcmp(arg, lit, lit_len) == 0;
-+}
-+
-+static int optPrefix(const char *arg, const char *lit) {
-+    size_t lit_len = strlen(lit);
-+    size_t arg_len;
-+
-+    if(arg == NULL)
-+        return FALSE;
-+
-+    arg_len = strnlen(arg, MAX_OPT_LEN + 1);
-+    if(arg_len > MAX_OPT_LEN || arg_len < lit_len)
-+        return FALSE;
-+
-+    return memcmp(arg, lit, lit_len) == 0;
-+}
-+
  void showNonStandardOptions() {
-     printf("  -Xbootclasspath:%s\n", BCP_MESSAGE);
-     printf("\t\t   locations where to find the system classes\n");
-@@ -107,15 +137,25 @@ void showVersionAndCopyright() {
+@@ -80,9 +89,13 @@ void showUsage(char *name) {
+     printf("\nwhere options include:\n");
+     printf("  -client\t   compatibility (ignored)\n");
+     printf("  -server\t   compatibility (ignored)\n\n");
+-    printf("  -cp\t\t   <jar/zip files and directories separated by :>\n");
+-    printf("  -classpath\t   <jar/zip files and directories separated by :>\n");
++    printf("  -cp\t\t   %s\n", BCP_MESSAGE);
++    printf("  -classpath\t   %s\n", BCP_MESSAGE);
+     printf("\t\t   locations where to find application classes\n");
++#ifdef __amigaos4__
++    printf("\t\t   an entry of \"*\", or a drawer followed by \"/*\",\n");
++    printf("\t\t   expands to the jars in that drawer\n");
++#endif
+     printf("  -D<name>=<value> set a system property\n");
+     printf("  -verbose[:class|gc|jni]\n");
+     printf("\t\t   :class print out information about class loading, etc.\n");
+@@ -107,15 +120,25 @@ void showVersionAndCopyright() {
      printf("but WITHOUT ANY WARRANTY; without even the implied warranty of\n");
      printf("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n");
      printf("GNU General Public License for more details.\n");
@@ -1158,133 +1185,63 @@ index 052f84a..d23f824 100644
  }
  
  void showFullVersion() {
-@@ -126,11 +166,20 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
-     Property props[argc-1];
-     int is_jar = FALSE;
-     int status = 0;
-+    char *prog_name = (argv != NULL && argv[0] != NULL) ? argv[0] : "java";
-+    const char *trace_startup = getenv("JAMVM_TRACE_STARTUP");
-     int i;
- 
-+    if(trace_startup != NULL && *trace_startup != '\0') {
-+        fprintf(stderr, "[jamvm] parseCommandLine argc=%d argv0=%s\n", argc, prog_name);
-+        for(i = 0; i < argc && argv != NULL && argv[i] != NULL && i < 16; i++) {
-+            fprintf(stderr, "[jamvm] argv[%d]=%.*s\n", i, MAX_OPT_LEN, argv[i]);
-+        }
-+    }
-+
-     args->commandline_props = &props[0];
- 
--    for(i = 1; i < argc; i++) {
-+    for(i = 1; i < argc && argv[i] != NULL; i++) {
-         if(*argv[i] != '-') {
-             if(args->min_heap > args->max_heap) {
-                 printf("Minimum heap size greater than max!\n");
-@@ -153,6 +202,13 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
-             return i;
-         }
- 
-+        if(strnlen(argv[i], MAX_OPT_LEN + 1) > MAX_OPT_LEN) {
-+            printf("Malformed command line option (too long or unterminated): %.*s\n",
-+                   MAX_OPT_LEN, argv[i]);
-+            status = 1;
-+            goto usage;
-+        }
-+
-         switch(parseCommonOpts(argv[i], args, FALSE)) {
-             case OPT_OK:
-                 break;
-@@ -163,42 +219,42 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
-         	
-             case OPT_UNREC:
-             default:
--                if(strcmp(argv[i], "-?") == 0 ||
--                   strcmp(argv[i], "-help") == 0) {
-+                if(optEq(argv[i], "-?") ||
-+                   optEq(argv[i], "-help")) {
-                     goto usage;
- 
--                } else if(strcmp(argv[i], "-X") == 0) {
-+                } else if(optEq(argv[i], "-X")) {
-                     showNonStandardOptions();
-                     goto exit;
- 
--                } else if(strcmp(argv[i], "-version") == 0) {
-+                } else if(optEq(argv[i], "-version")) {
-                     showVersionAndCopyright();
-                     goto exit;
- 
--                } else if(strcmp(argv[i], "-showversion") == 0) {
-+                } else if(optEq(argv[i], "-showversion")) {
-                     showVersionAndCopyright();
-         
--                } else if(strcmp(argv[i], "-fullversion") == 0) {
-+                } else if(optEq(argv[i], "-fullversion")) {
-                     showFullVersion();
-                     goto exit;
- 
--                } else if(strncmp(argv[i], "-verbose", 8) == 0) {
-+                } else if(optPrefix(argv[i], "-verbose")) {
-                     char *type = &argv[i][8];
- 
--                    if(*type == '\0' || strcmp(type, ":class") == 0)
-+                    if(*type == '\0' || optEq(type, ":class"))
-                         args->verboseclass = TRUE;
- 
--                    else if(strcmp(type, ":gc") == 0 || strcmp(type, "gc") == 0)
-+                    else if(optEq(type, ":gc") || optEq(type, "gc"))
-                         args->verbosegc = TRUE;
- 
--                    else if(strcmp(type, ":jni") == 0)
-+                    else if(optEq(type, ":jni"))
-                         args->verbosedll = TRUE;
- 
--                } else if(strcmp(argv[i], "-jar") == 0) {
-+                } else if(optEq(argv[i], "-jar")) {
-                     is_jar = TRUE;
- 
--                } else if(strcmp(argv[i], "-classpath") == 0 ||
--                          strcmp(argv[i], "-cp") == 0) {
-+                } else if(optEq(argv[i], "-classpath") ||
-+                          optEq(argv[i], "-cp")) {
- 
-                     if(i == argc - 1) {
-                         printf("%s : missing path list\n", argv[i]);
-@@ -206,18 +262,18 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
-                     }
-                     args->classpath = argv[++i];
- 
--                } else if(strncmp(argv[i], "-Xbootclasspath/c:", 18) == 0) {
-+                } else if(optPrefix(argv[i], "-Xbootclasspath/c:")) {
-                     args->bootpath_c = argv[i] + 18;
- 
--                } else if(strncmp(argv[i], "-Xbootclasspath/v:", 18) == 0) {
-+                } else if(optPrefix(argv[i], "-Xbootclasspath/v:")) {
+@@ -212,6 +235,18 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+                 } else if(strncmp(argv[i], "-Xbootclasspath/v:", 18) == 0) {
                      args->bootpath_v = argv[i] + 18;
  
++                /* These plain/append/prepend forms were missing in the JAmiga
++                   fork, so -Xbootclasspath: was silently ignored and the VM
++                   fell back to the (non-existent) default JAmiga: boot path. */
++                } else if(strncmp(argv[i], "-Xbootclasspath/a:", 18) == 0) {
++                    args->bootpath_a = argv[i] + 18;
++
++                } else if(strncmp(argv[i], "-Xbootclasspath/p:", 18) == 0) {
++                    args->bootpath_p = argv[i] + 18;
++
++                } else if(strncmp(argv[i], "-Xbootclasspath:", 16) == 0) {
++                    args->bootpath = argv[i] + 16;
++
                  /* Compatibility options */
--                } else if(strcmp(argv[i], "-client") == 0 ||
--                          strcmp(argv[i], "-server") == 0) {
-+                } else if(optEq(argv[i], "-client") ||
-+                          optEq(argv[i], "-server")) {
-                     /* Ignore */
-                 } else {
--                    printf("Unrecognised command line option: %s\n", argv[i]);
-+                    printf("Unrecognised command line option: %.*s\n", MAX_OPT_LEN, argv[i]);
-                     status = 1;
-                     goto usage;
-                 }
-@@ -225,7 +281,7 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+                 } else if(strcmp(argv[i], "-client") == 0 ||
+                           strcmp(argv[i], "-server") == 0) {
+@@ -251,10 +286,26 @@ int main(int argc, char *argv[]) {
+         exit(1);
      }
  
- usage:
--    showUsage(argv[0]);
-+    showUsage(prog_name);
+-   if((system_loader = getSystemClassLoader()) == NULL)
++
++#ifdef __amigaos4__
++    /* The OpenJDK system classloader (sun.misc.Launcher) now initialises reliably on
++       AmigaOS -- the earlier "heisenbug" was missing openjdk natives (CDS stubs,
++       VM.latestUserDefinedLoader0, TimeZone, ...), now supplied.  Use the real system
++       loader; classes on -Xbootclasspath load via delegation.  Fall back to the
++       bootstrap loader if it ever fails to init.  KNOWN GAP: loading an app class from
++       a -classpath entry (URLClassPath) still fails -- Amiga "volume:" path -> URL
++       (Phase 3 TODO); -Xbootclasspath is the working path meanwhile. */
++    system_loader = getSystemClassLoader();
++    if(system_loader == NULL)
++        clearException();
++    else
++        mainThreadSetContextClassLoader(system_loader);
++#else
++    if((system_loader = getSystemClassLoader()) == NULL)
+         goto error;
  
- exit:
-     exit(status);
+     mainThreadSetContextClassLoader(system_loader);
++#endif
+ 
+     for(cpntr = argv[class_arg]; *cpntr; cpntr++)
+         if(*cpntr == '.')
+@@ -301,6 +352,5 @@ error:
+     mainThreadWaitToExitVM();
+     exitVM(status);
+ 
+-   /* Keep the compiler happy */
+-    return 0;
++    return status;
+ }
 diff --git a/src/jam.h b/src/jam.h
-index ce73df6..dcee7f1 100644
+index ce73df6..858bfc8 100644
 --- a/src/jam.h
 +++ b/src/jam.h
 @@ -879,7 +879,11 @@ typedef struct InitArgs {
@@ -1308,6 +1265,25 @@ index ce73df6..dcee7f1 100644
  extern void uncaughtException();
  extern void exitVM(int status);
  extern void scanThreads();
+@@ -1209,6 +1215,18 @@ extern char *getExecutionEngineName();
+ extern char *getJavaHome();
+ extern char *getCwd();
+ 
++#ifdef __amigaos4__
++/* os/amiga/os.c -- see the "AmigaDOS path model" comment there */
++extern const char *amigaPath(const char *path);
++extern int amigaIsDosName(const char *name, int len);
++extern char *amigaProgramDir(void);
++extern char *amiga_launch_cwd;
++
++/* os/amiga/classpath.c */
++extern char *amigaClassPath(const char *cp);
++extern int amigaIsPathListSep(const char *list, int start, int i, int *seen_vol);
++#endif
++
+ /* access */
+ 
+ extern int initialiseAccess();
 diff --git a/src/jni.c b/src/jni.c
 index 6edb60b..6886837 100644
 --- a/src/jni.c
@@ -1330,10 +1306,10 @@ index 6edb60b..6886837 100644
  }
  
 diff --git a/src/os/amiga/os.c b/src/os/amiga/os.c
-index 5561c20..b8a6b6d 100644
+index 5561c20..55f0be7 100644
 --- a/src/os/amiga/os.c
 +++ b/src/os/amiga/os.c
-@@ -19,241 +19,168 @@
+@@ -19,241 +19,191 @@
   * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
   */
  
@@ -1365,7 +1341,7 @@ index 5561c20..b8a6b6d 100644
 -#include <proto/nativelib.h>
 -#define VERSIONTAG VERSTAG" AmigaOS 4 build of "PACKAGE" "VERSION" "
 -STRPTR USED ver = (STRPTR)VERSIONTAG;
--
+ 
 -/**
 - * Struct from JAmiga JNI library definition.
 - */
@@ -1383,11 +1359,8 @@ index 5561c20..b8a6b6d 100644
 -    int numberOfMethods;
 -    struct JNINativeMethod *methods;
 -};
- 
-+#define __USE_GNU
-+#include <dlfcn.h>
-+#include <pthread.h>
- 
+-
+-
 -/**
 - * Internal struct for native methods
 - * with mangled symbol name.
@@ -1396,7 +1369,10 @@ index 5561c20..b8a6b6d 100644
 -    char *symbolName;
 -    void *fnPtr;
 -};
--
++#define __USE_GNU
++#include <dlfcn.h>
++#include <pthread.h>
+ 
 +#define VERSIONTAG VERSTAG" AmigaOS 4 build of "PACKAGE" "VERSION" "
 +STRPTR USED ver = (STRPTR)VERSIONTAG;
  
@@ -1441,31 +1417,17 @@ index 5561c20..b8a6b6d 100644
 +    return dlerror();
  }
  
--
++/* Java -> AmigaDOS path conversion: single source of truth in
++   src/openjdk/amiga_path.h (the jamvm build scripts add -I src/openjdk), shared
++   with the OpenJDK natives, tested on the host by tools/test-amiga-path.c.
++   Exported here under the VM's name for JVM_Open, nativeLibOpen, processArchive
++   and the boot-classpath stat. */
++#include "amiga_path.h"
+ 
 -char* nativeLibError() {
 -    return "Misc error";
-+/* The VM's own program directory (PROGDIR:) as a real, absolute AmigaDOS path
-+   (e.g. "SYS:Java"), resolved once and cached.  Lets the boot jars, java.home
-+   and the bundled native libraries be found relative to where jamvm-openjdk
-+   lives -- INDEPENDENT of the current directory, so the `java` launcher no
-+   longer has to `CD JAVA:` (which leaked into the caller's shell and re-based
-+   the user's relative -cp).  NULL if PROGDIR: can't be resolved -- callers then
-+   fall back to their old cwd-relative behaviour. */
-+char *amigaProgramDir(void) {
-+    static char *cached = NULL;
-+    static int tried = FALSE;
-+    BPTR lock;
-+    char buff[1024];
-+
-+    if(tried)
-+        return cached;
-+    tried = TRUE;
-+
-+    lock = GetProgramDir();
-+    if(lock != 0 && NameFromLock(lock, (STRPTR)buff, sizeof(buff)))
-+        cached = strcpy(sysMalloc(strlen(buff) + 1), buff);   /* "Volume:dir" */
-+
-+    return cached;
++const char *amigaPath(const char *path) {
++    return amiga_path(path);
  }
  
 -extern char *mangleString(char *utf8);
@@ -1499,32 +1461,26 @@ index 5561c20..b8a6b6d 100644
 -        return NULL;
 -    }
 -    #endif
--
-+/* The directory `java` was launched from (the user's cwd), captured before the
-+   startup chdir -- setUserDirProperty() uses it for java.io's user.dir so a
-+   relative -cp resolves against the USER's dir, not the install drawer. */
-+char *amiga_launch_cwd = NULL;
++/* TRUE if `name` (len chars, no trailing ':') names a mounted volume, an assign
++   or a device.  This is what lets us tell an AmigaDOS volume separator
++   ("Work:lib/x.jar") apart from a Java path-list separator ("app.jar:lib/x.jar")
++   -- on AmigaOS both are spelt ':'.  Asking DOS is exact and, unlike stat()ing
++   the name, never pops an "insert volume" requester. */
++int amigaIsDosName(const char *name, int len) {
++    const ULONG flags = LDF_VOLUMES | LDF_ASSIGNS | LDF_DEVICES;
++    struct DosList *list, *entry;
++    char buff[128];
 +
-+/* Run the VM with its current dir = its own program directory, so the colon-free,
-+   cwd-relative boot classpath / sun.boot.library.path / java.home resolve against
-+   the install drawer.  (On AmigaOS ':' is BOTH the volume separator and Java's
-+   path.separator, so absolute paths cannot be used in those path *lists*.)  clib4
-+   saves the entry CurrentDir and its destructor restores it at exit, so this does
-+   NOT leak into the caller's shell.  Called once from initialisePlatform(). */
-+void amigaSetupCwd(void) {
-+    char *pd;
-+
-+    amiga_launch_cwd = getCwd();        /* the launch cwd -- BEFORE the chdir */
-+    pd = amigaProgramDir();
-+    if(pd != NULL)
-+        chdir(pd);
-+}
++    if(name == NULL || len <= 0 || len >= (int)sizeof(buff))
++        return FALSE;
+ 
++    memcpy(buff, name, len);
++    buff[len] = '\0';
  
 -    // Obtain pointer array to native methods
 -    nativeInfo = (APTR)GetLibraryContent();
-+char *nativeLibPath() {
-+    return getenv("LD_LIBRARY_PATH");
-+}
++    if((list = LockDosList(flags | LDF_READ)) == NULL)
++        return FALSE;
  
 -    if(!nativeInfo) {
 -        #if (JA_TARGETOS==JA_AMIGAOS4)
@@ -1533,23 +1489,69 @@ index 5561c20..b8a6b6d 100644
 -        #endif
 -        CloseLibrary(myLib);
 -        sysFree(libraryInfo);
++    entry = FindDosEntry(list, (STRPTR)buff, flags);
++    UnLockDosList(flags | LDF_READ);
++
++    return entry != NULL;
++}
++
++/* The VM's own program directory (PROGDIR:) as a real, absolute AmigaDOS path
++   (e.g. "SYS:Java"), resolved once and cached.  Lets the boot jars, java.home
++   and the bundled native libraries be found relative to where jamvm-openjdk
++   lives -- INDEPENDENT of the current directory, so the `java` launcher no
++   longer has to `CD JAVA:` (which leaked into the caller's shell and re-based
++   the user's relative -cp).  NULL if PROGDIR: can't be resolved -- callers then
++   fall back to their old cwd-relative behaviour. */
++char *amigaProgramDir(void) {
++    static char *cached = NULL;
++    static int tried = FALSE;
++    BPTR lock;
++    char buff[1024];
++
++    if(tried)
++        return cached;
++    tried = TRUE;
++
++    lock = GetProgramDir();
++    if(lock != 0 && NameFromLock(lock, (STRPTR)buff, sizeof(buff)))
++        cached = strcpy(sysMalloc(strlen(buff) + 1), buff);   /* "Volume:dir" */
++
++    return cached;
++}
++
++/* The directory `java` was launched from -- user.dir, and the anchor for
++   relative -cp entries.  Also the process's current directory: see below. */
++char *amiga_launch_cwd = NULL;
++
++/* The VM used to chdir() into its own install drawer here, because the boot
++   classpath, sun.boot.library.path and the ext dirs were all relative names
++   resolved against the current directory.  They are java.home-absolute now, so
++   the chdir is gone and the process cwd stays where the user launched from.
++
++   That matters more than it looks.  java.io does resolve relative paths against
++   user.dir before reaching a native call -- but not everything goes through
++   java.io: java.util.zip.ZipFile hands File.getPath() (the path AS GIVEN, not
++   absolutised) straight to open().  With the cwd pointing at the install drawer,
++   an application's own `new ZipFile("App.jar")` therefore looked for App.jar
++   under JAVA: and failed, while every java.io.File call on the same name worked.
++   cwd == user.dir is what a Unix JVM gives you, and now so do we. */
++void amigaSetupCwd(void) {
++    amiga_launch_cwd = getCwd();
++}
++
++char *nativeLibPath() {
++    return getenv("LD_LIBRARY_PATH");
++}
++
 +void *nativeLibOpen(char *path) {
-+    /* java.io presents canonical paths as Unix-absolute ("/Volume:dir/...") so
-+       File.toURI()/isAbsolute() behave; strip the leading '/' for volume paths
-+       (and a leading "./") so clib4 dlopen gets a real AmigaDOS path.  Also
-+       collapse ":/" right after a volume/assign name ("JAVA:/libzip.so" ->
-+       "JAVA:libzip.so") -- '/' after the volume is the parent of the root. */
-+    char *p = path;
-+    char *colon;
++    /* ClassLoader hands us the Unix-absolute form ("/Volume:dir/libzip.so");
++       clib4's dlopen wants the AmigaDOS one. */
++    const char *p = amigaPath(path);
 +    void *h;
-+    if(path == NULL)
++
++    if(p == NULL)
          return NULL;
-+    if(p[0] == '.' && p[1] == '/')
-+        p += 2;
-+    else if(p[0] == '/') {
-+        char *c = p + 1;
-+        while(*c && *c != '/') { if(*c == ':') { p++; break; } c++; }
-     }
+-    }
 -    libraryInfo = sysMalloc(sizeof(struct JamLibraryInfo));
 -
 -    #if (JA_TARGETOS==JA_AMIGAOS4)
@@ -1592,21 +1594,10 @@ index 5561c20..b8a6b6d 100644
 -        libraryInfo->nativeMethods[j].fnPtr = nativeInfo->methods[j].fnPtr;
 -        libraryInfo->nativeMethods[j].symbolName = mangleString(tempName);
 -        sysFree(tempName);
-+    colon = strchr(p, ':');
-+    if(colon != NULL && colon[1] == '/' && colon[2] != '/') {
-+        char fixed[strlen(p)];
-+        char *src = colon + 1, *dst = fixed + (colon + 1 - p);
-+
-+        memcpy(fixed, p, colon + 1 - p);
-+        while((*dst++ = *++src) != '\0')
-+            ;
-+        h = dlopen(fixed, RTLD_LAZY);
-+        DebugPrintF("[DLOPEN] '%s' -> %p%s\n", fixed, h,
-+                    h ? "" : " FAILED");
-+        return h;
-     }
+-    }
 -
 -    return libraryInfo;
++
 +    h = dlopen(p, RTLD_LAZY);
 +    DebugPrintF("[DLOPEN] '%s' -> %p%s\n", p, h,
 +                h ? "" : " FAILED");
@@ -1697,11 +1688,19 @@ index 5561c20..b8a6b6d 100644
 +
 +    return path;
 +}
++
++/* The -classpath / -Xbootclasspath rewriter: accepts ':' as well as ';' and
++   expands wildcards.  The logic lives in the Java-OS4 tree (src/jamvm/, added to
++   the include path by tools/build-jamvm-*.sh) rather than here, so that
++   tools/test-amiga-classpath.c can compile and test the very same code on the
++   host -- see the header for why it is not a .c file in this tree. */
++#define CP_TRACE DebugPrintF
++#include "amiga_classpath.h"
 diff --git a/src/os/amiga/powerpc/init.c b/src/os/amiga/powerpc/init.c
-index 075b0ef..c1d759e 100644
+index 075b0ef..cd42452 100644
 --- a/src/os/amiga/powerpc/init.c
 +++ b/src/os/amiga/powerpc/init.c
-@@ -18,3 +18,41 @@
+@@ -18,3 +18,46 @@
   * along with this program; if not, write to the Free Software
   * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
   */
@@ -1738,10 +1737,15 @@ index 075b0ef..c1d759e 100644
 +    if(ErrorOutput() == 0)
 +        SelectErrorOutput(Output());
 +
-+    /* NOTE: the VM does NOT chdir to its program dir.  The runtime paths (boot
-+       classpath, sun.boot.library.path, java.home) are absolute "JAVA:"-anchored,
-+       so they resolve regardless of the current dir, and the caller's cwd is kept
-+       so the user's relative -cp entries resolve against THEIR directory. */
++    /* Switch the current dir to the VM's own program directory so the colon-free
++       runtime paths (boot classpath, sun.boot.library.path, java.home) resolve
++       there regardless of where `java` was launched -- without leaking the dir
++       change into the caller's shell, and keeping user.dir = the launch dir.
++       See amigaSetupCwd() in os/amiga/os.c. */
++    {
++        extern void amigaSetupCwd(void);
++        amigaSetupCwd();
++    }
 +}
 diff --git a/src/os/amiga/pthread.h b/src/os/amiga/pthread.h
 deleted file mode 100644
@@ -1881,25 +1885,27 @@ index 914c979..0000000
 -#endif
 diff --git a/src/os/amiga/real_amiga_exit.c b/src/os/amiga/real_amiga_exit.c
 new file mode 100644
-index 0000000..e5e006f
+index 0000000..728d9bc
 --- /dev/null
 +++ b/src/os/amiga/real_amiga_exit.c
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,114 @@
 +/*
-+ * real_amiga_exit.c -- hard process teardown for AmigaOS 4 (clib4).
++ * AmigaOS4 final process teardown for the clib4/OpenJDK build.
 + *
-+ * Called by amiga_exit() (src/init.c) at the very end of VM shutdown, after
-+ * the cooperative VM-thread shutdown has drained threads_count.  clib4's
-+ * exit() waits for ALL child pthreads (which are real AmigaOS child
-+ * processes); a stuck child (e.g. a wedged EDT) would deadlock the process
-+ * forever.  Break-signal any surviving children, wait for them to go away,
-+ * then _Exit(), which bypasses clib4's parent-waits-child logic entirely.
-+ *
-+ * Reconstructed for the clib4 build from the JAmiga-era scanprocess.c logic.
++ * The upstream JAmiga scanprocess.c contains a realAmigaExit() that depends on
++ * the old JAmiga pthread/memory/baseline_glue shims.  In the clib4 build those
++ * shims are intentionally replaced by clib4's own pthread/scandir/signal/mmap,
++ * so that implementation cannot be linked.  This file provides a self-contained
++ * realAmigaExit() that uses only Exec/DOS APIs to terminate remaining child
++ * tasks before calling _Exit(), avoiding the clib4 "parent waits for children"
++ * wedge that hangs AWT/Swing shutdown.
 + */
 +
-+#include <stdint.h>
-+#include <unistd.h>
++#ifdef __amigaos4__
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <signal.h>
 +
 +#include <proto/exec.h>
 +#include <proto/dos.h>
@@ -1909,49 +1915,94 @@ index 0000000..e5e006f
 +#define JA_TRACE(fmt, ...) DebugPrintF(fmt, ##__VA_ARGS__)
 +#endif
 +
-+/* ProcessScan hook: break-signal every surviving child process of the VM
-+   (skipping filesystem handler processes and already-removed tasks). */
-+static uint32 ASM find_java_child_kill(REG(a0, struct Hook *hook),
-+                                       REG(a2, struct Process *parentproc),
-+                                       REG(a1, struct Process *proc)) {
-+    if(proc->pr_ParentID == parentproc->pr_ProcessID
-+            && (proc->pr_Flags & (1 << PRB_HANDLERPROCESS)) != (1 << PRB_HANDLERPROCESS)
-+            && proc->pr_Task.tc_State != TS_REMOVED) {
-+        JA_TRACE("[EXIT] break-signalling child %ld (%s)\n",
-+                 proc->pr_ProcessID, proc->pr_Task.tc_Node.ln_Name);
-+        Signal((struct Task *)proc, SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F);
-+        (*(uint32 *)hook->h_Data)++;
++#define BYTETOBINARYPATTERN "%d%d%d%d %d%d%d%d %d%d%d%d %d%d%d%d"
++#define BYTETOBINARY(byte)  \
++  (byte & 0x8000 ? 1 : 0), \
++  (byte & 0x4000 ? 1 : 0), \
++  (byte & 0x2000 ? 1 : 0), \
++  (byte & 0x1000 ? 1 : 0), \
++  (byte & 0x0800 ? 1 : 0), \
++  (byte & 0x0400 ? 1 : 0), \
++  (byte & 0x0200 ? 1 : 0), \
++  (byte & 0x0100 ? 1 : 0), \
++  (byte & 0x0080 ? 1 : 0), \
++  (byte & 0x0040 ? 1 : 0), \
++  (byte & 0x0020 ? 1 : 0), \
++  (byte & 0x0010 ? 1 : 0), \
++  (byte & 0x0008 ? 1 : 0), \
++  (byte & 0x0004 ? 1 : 0), \
++  (byte & 0x0002 ? 1 : 0), \
++  (byte & 0x0001 ? 1 : 0)
++
++/**
++ * ProcessScan() hook: kill (or signal) any child process of the caller.
++ * We do not try to distinguish Java threads from other children here;
++ * by the time realAmigaExit() runs the VM has already asked every thread
++ * to exit cooperatively, so anything still alive is a shutdown straggler.
++ */
++STATIC uint32 ASM find_child_kill(REG(a0, struct Hook *hook),
++                                  REG(a2, struct Process *parentproc),
++                                  REG(a1, struct Process *proc))
++{
++    uint32 sigSet = 0;
++
++    if(proc->pr_ParentID == parentproc->pr_ProcessID) {
++        JA_TRACE("child %ld (%20s) state:"BYTETOBINARYPATTERN"\n",
++                 proc->pr_ProcessID,
++                 ((struct Task*)proc)->tc_Node.ln_Name,
++                 BYTETOBINARY(((struct Task*)proc)->tc_State));
++
++        if(proc->pr_Task.tc_State == TS_SUSPENDED) {
++            JA_TRACE("Removing suspended child %ld\n", proc->pr_ProcessID);
++            RemTask((struct Task *)proc);
++            (*(uint32*)hook->h_Data)++;
++        } else if((proc->pr_Task.tc_State != TS_READY) &&
++                  (proc->pr_Task.tc_State != TS_REMOVED)) {
++            sigSet = (1 << SIGKILL);
++            JA_TRACE("Signalling child %ld with SIGKILL\n", proc->pr_ProcessID);
++            Signal((struct Task *)proc, sigSet);
++            (*(uint32*)hook->h_Data)++;
++        } else {
++            JA_TRACE("Not signalling ready child %ld\n", proc->pr_ProcessID);
++        }
 +    }
-+    return 0;   /* continue scanning */
++    return 0; /* continue scanning */
 +}
 +
-+void realAmigaExit(int error) {
-+    struct Process *me = (struct Process *)FindTask(NULL);
++/**
++ * Hard process exit: signal/kill remaining child tasks, then _Exit().
++ */
++void realAmigaExit(int error)
++{
++    struct Task *me = FindTask(NULL);
 +    struct Hook H;
 +    uint32 proc_count;
-+    int tries = 0;
 +
-+    JA_TRACE("[EXIT] realAmigaExit(%d)\n", error);
++    JA_TRACE("realAmigaExit(%d)\n", error);
 +
-+    NotifyProcListChange(me, SIGBREAKB_CTRL_F, 0);
++    /* Ask DOS to notify us when the process list changes. */
++    NotifyProcListChange((struct Process *)me, SIGBREAKB_CTRL_F, 0);
 +
-+    H.h_Entry = (APTR)&find_java_child_kill;
++    H.h_Entry = (APTR)&find_child_kill;
 +    H.h_Data = &proc_count;
 +
 +    do {
 +        proc_count = 0;
-+        ProcessScan(&H, (CONST APTR)me, 0);
++        ProcessScan(&H, (APTR)me, 0);
 +
-+        JA_TRACE("[EXIT] waiting for %ld child processes\n", proc_count);
-+        if(proc_count > 0)
++        if(proc_count > 0) {
++            JA_TRACE("Waiting for %ld children to die\n", proc_count);
 +            Wait(SIGBREAKF_CTRL_F);
-+    } while(proc_count > 0 && tries++ < 100);
++        }
++    } while(proc_count > 0);
 +
 +    NotifyProcListChange(NULL, NPLC_END, 0);
 +
-+    /* Hard exit: no atexit, no clib4 child-wait -- the process is gone now. */
++    JA_TRACE("realAmigaExit: calling _Exit(%d)\n", error);
 +    _Exit(error);
 +}
++
++#endif /* __amigaos4__ */
 diff --git a/src/os/amiga/sched.h b/src/os/amiga/sched.h
 deleted file mode 100644
 index cfe68d2..0000000
@@ -2121,19 +2172,31 @@ index d0e45f6..0000000
 -
 -#endif
 diff --git a/src/properties.c b/src/properties.c
-index b453d7b..772a385 100644
+index b453d7b..9793439 100644
 --- a/src/properties.c
 +++ b/src/properties.c
-@@ -152,6 +152,21 @@ char *getExecutionEngineName() {
- void setUserDirProperty(Object *properties) {
-     char *cwd = getCwd();
+@@ -150,12 +150,96 @@ char *getExecutionEngineName() {
+ }
  
+ void setUserDirProperty(Object *properties) {
+-    char *cwd = getCwd();
++    char *cwd;
++
 +#ifdef __amigaos4__
-+    /* Present user.dir Unix-absolute ("/Volume:dir"): java.io accepts it via
-+       the niopatch UnixFileSystem (volume-colon prefix rule), and sun.nio.fs.
-+       UnixFileSystem's constructor REQUIRES a leading '/' ("default directory
-+       must be absolute" otherwise).  The native open/stat chokepoints strip
-+       the '/' back off for AmigaDOS. */
++    /* user.dir = the directory the user ran `java` from, captured before the VM
++       chdir'd into its own install drawer (amigaSetupCwd).  An application's
++       relative paths -- its config files, its data drawer -- must resolve THERE,
++       not in the runtime's install drawer; getting this wrong is what made a
++       plain `java -jar App.jar` go looking for the app's files under JAVA: (and,
++       via the Unix-absolute spelling, pop "Please insert volume /Work:").  The
++       runtime's own lists no longer depend on user.dir: sun.boot.library.path,
++       java.ext.dirs and java.endorsed.dirs are java.home-absolute.  Presented
++       Unix-absolute ("/Volume:dir") because sun.nio.fs rejects a default
++       directory that does not start with '/'; amigaPath() strips it back off at
++       the native chokepoints. */
++    cwd = amiga_launch_cwd != NULL
++              ? strcpy(sysMalloc(strlen(amiga_launch_cwd) + 1), amiga_launch_cwd)
++              : getCwd();
 +    if(cwd != NULL && cwd[0] != '/') {
 +        char *slashed = sysMalloc(strlen(cwd) + 2);
 +        slashed[0] = '/';
@@ -2141,25 +2204,136 @@ index b453d7b..772a385 100644
 +        sysFree(cwd);
 +        cwd = slashed;
 +    }
++#else
++    cwd = getCwd();
 +#endif
-+
+ 
      setProperty(properties, "user.dir", cwd);
      sysFree(cwd);
  }
-@@ -190,7 +205,11 @@ void addDefaultProperties(Object *properties) {
+ 
++#ifdef __amigaos4__
++/* AmigaOS has no per-user home directory, but Java applications very much
++   expect user.home to be a real, writable, STABLE one: java.util.prefs puts
++   .java/.userPrefs there, applications put their own dot-drawer there, and they
++   typically create only the LAST component (Invoicex does a single-level
++   File.mkdir()), so the parent has to exist already.  With no value at all
++   setProperty() above substitutes "?" -- and '?' is an AmigaDOS pattern
++   character, so every such path blew up ("?/.invoicex/finestre.txt (No such
++   file or directory)").
++
++   ENV: is the AmigaOS global settings drawer, so that is what we use.  Note it
++   is normally an assign to RAM:Env, rebuilt from ENVARC: at every boot -- what
++   applications write there does NOT survive a reboot unless something copies it
++   back to ENVARC:.
++
++   Order: an explicit HOME wins (so `SetEnv HOME Work:MyHome` overrides all of
++   this), then ENV:, then java.home as a last resort for a system where ENV: is
++   somehow not assigned.
++
++   Unlike user.dir this is given in PLAIN AmigaDOS form ("ENV:", not "/ENV:"):
++   the niopatch java.io.UnixFileSystem already treats a "Volume:" prefix as
++   absolute and joins it without a separator, and it keeps the paths users see in
++   messages looking like AmigaOS paths.  The one place the leading '/' still
++   buys something is sun.nio.fs, whose UnixPath calls a path relative unless it
++   starts with '/' -- so Paths.get(user.home).toAbsolutePath() would resolve
++   against user.dir.  Nothing in the JDK does that with user.home (java.util.prefs
++   and friends go through java.io.File), but keep it in mind. */
++static char *amigaUserHome(void) {
++    char *env = getenv("HOME");
++    char *home;
++
++    if(env != NULL && *env != '\0')
++        return strcpy(sysMalloc(strlen(env) + 1), env);
++
++    if(amigaIsDosName("ENV", 3))
++        return strcpy(sysMalloc(sizeof("ENV:")), "ENV:");
++
++    home = getJavaHome();
++    if(home == NULL || *home == '\0')
++        return NULL;
++
++    /* java.home is already AmigaDOS form ("Work:Java") */
++    return strcpy(sysMalloc(strlen(home) + 1), home);
++}
++
++/* Likewise user.name: AmigaOS is single-user and sets neither USER nor
++   USERNAME, and java.util.prefs embeds the value in file names
++   (".userRootModFile." + user.name), so "?" produced unopenable files. */
++static char *amigaUserName(void) {
++    char *env = getenv("USER");
++
++    if(env == NULL || *env == '\0')
++        env = getenv("USERNAME");
++
++    return (env != NULL && *env != '\0') ? env : "amiga";
++}
++#endif
++
+ void setOSProperties(Object *properties) {
+     struct utsname info;
+ 
+@@ -183,17 +267,58 @@ void addDefaultProperties(Object *properties) {
+ 
+     setProperty(properties, "java.home", getJavaHome());
+     setProperty(properties, "java.class.path", getClassPath());
++#ifdef __amigaos4__
++    /* sun.boot.class.path must use the Java path.separator (';' on AmigaOS) with
++       resolvable absolute entries, NOT the raw ':'-joined C boot path -- otherwise
++       sun.misc.Launcher misreads it as one "niopatch.zip:..." entry, popping a bogus
++       "Please insert volume niopatch.zip" requester and breaking getBootstrapResource()
++       (which in turn makes sun.reflect.misc.MethodUtil's Trampoline lookup fall back to
++       the bootstrap loader and throw).  See amigaBootClassPathProperty() in class.c. */
++    {
++        extern char *amigaBootClassPathProperty(void);
++        char *bcp = amigaBootClassPathProperty();
++        setProperty(properties, "sun.boot.class.path", bcp);
++        sysFree(bcp);
++    }
++#else
+     setProperty(properties, "sun.boot.class.path", getBootClassPath());
++#endif
+     setProperty(properties, "sun.boot.library.path", getBootDllPath());
+     setProperty(properties, "java.library.path", getDllPath());
+     setProperty(properties, "java.endorsed.dirs", getEndorsedDirs());
      setProperty(properties, "java.ext.dirs", classlibDefaultExtDirs());
++#ifdef __amigaos4__
++    /* T: is AmigaOS's temporary drawer; "/tmp" would be read by AmigaDOS as
++       "tmp in the parent directory".  Unix-absolute spelling as everywhere else. */
++    setProperty(properties, "java.io.tmpdir", "/T:");
++#else
      setProperty(properties, "java.io.tmpdir", "/tmp");
++#endif
      setProperty(properties, "file.separator", "/");
 +#ifdef __amigaos4__
++    /* On AmigaOS ':' is the volume separator (RAM:, Work:), so it cannot also be
++       the path-list separator -- absolute paths in java.class.path /
++       java.library.path / sun.boot.library.path would be mangled.  Use ';' like
++       Windows (whose ':' is the drive separator).  ':' is still ACCEPTED in a
++       -cp / -Xbootclasspath the user types: see isPathListSep() in class.c. */
 +    setProperty(properties, "path.separator", ";");
 +#else
      setProperty(properties, "path.separator", ":");
 +#endif
      setProperty(properties, "line.separator", "\n");
++#ifdef __amigaos4__
++    /* AmigaOS sets neither, and a NULL here becomes "?" -- see amigaUserHome() */
++    setProperty(properties, "user.name", amigaUserName());
++    {
++        char *home = amigaUserHome();
++
++        setProperty(properties, "user.home", home);
++        sysFree(home);
++    }
++#else
      setProperty(properties, "user.name", getenv("USER"));
      setProperty(properties, "user.home", getenv("HOME"));
++#endif
+ 
+     setOSProperties(properties);
+     setUserDirProperty(properties);
 diff --git a/src/thread.c b/src/thread.c
-index e4fb7d1..c195ac1 100644
+index e4fb7d1..2896d91 100644
 --- a/src/thread.c
 +++ b/src/thread.c
 @@ -110,6 +110,12 @@ static int threads_waiting_to_start = 0;
@@ -2490,7 +2664,7 @@ index e4fb7d1..c195ac1 100644
  int initialiseThreadStage2(InitArgs *args) {
      Class *thrdGrp_class;
      Object *main_group, *java_thread;
-@@ -1332,12 +1530,19 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1332,9 +1530,11 @@ int initialiseThreadStage2(InitArgs *args) {
      MethodBlock *run, *remove_thread;
  
      /* Load thread class and register reference for compaction threading */
@@ -2502,92 +2676,33 @@ index e4fb7d1..c195ac1 100644
      registerStaticClassRef(&thread_class);
  
      name = findField(thread_class, SYMBOL(name), classlibThreadNameType());
-+    if(name == NULL)
-+        /* Newer OpenJDK 8 updates (incl. Temurin) changed Thread.name from
-+           char[] to String -- accept the String variant too */
-+        name = findField(thread_class, SYMBOL(name),
-+                                     SYMBOL(sig_java_lang_String));
-     daemon = findField(thread_class, SYMBOL(daemon), SYMBOL(Z));
-     group = findField(thread_class, SYMBOL(group),
-                                     SYMBOL(sig_java_lang_ThreadGroup));
-@@ -1349,8 +1554,12 @@ int initialiseThreadStage2(InitArgs *args) {
-     /* findField and findMethod do not throw an exception... */
-     if((run == NULL) || (daemon == NULL)   || (group == NULL)
-                      || (priority == NULL) || (threadId == NULL)
--                     || (name == NULL))
-+                     || (name == NULL)) {
-+        jam_fprintf(stderr, "[jamvm] threadinit: Thread field/method mismatch: "
-+                            "run=%p daemon=%p group=%p priority=%p tid=%p name=%p\n",
-+                            run, daemon, group, priority, threadId, name);
-         goto error;
-+    }
- 
-     name_offset = name->u.offset;
-     daemon_offset = daemon->u.offset;
-@@ -1361,8 +1570,10 @@ int initialiseThreadStage2(InitArgs *args) {
- 
-     thrdGrp_class = findSystemClass(SYMBOL(java_lang_ThreadGroup));
- 
--    if(exceptionOccurred())
-+    if(exceptionOccurred()) {
-+        jam_fprintf(stderr, "[jamvm] threadinit: java.lang.ThreadGroup load failed\n");
-         goto error;
-+    }
- 
-     addThread_mb = findMethod(thrdGrp_class, classlibAddThreadName(),
-                                              SYMBOL(_java_lang_Thread__V));
-@@ -1371,40 +1582,64 @@ int initialiseThreadStage2(InitArgs *args) {
-                                               SYMBOL(_java_lang_Thread__V));
- 
-     /* findField and findMethod do not throw an exception... */
--    if((addThread_mb == NULL) || (remove_thread == NULL))
-+    if((addThread_mb == NULL) || (remove_thread == NULL)) {
-+        jam_fprintf(stderr, "[jamvm] threadinit: ThreadGroup add/removeThread "
-+                            "missing: add=%p remove=%p\n", addThread_mb, remove_thread);
-         goto error;
-+    }
- 
-     rmveThrd_mtbl_idx = remove_thread->method_table_index;
+@@ -1378,11 +1578,13 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Classlib specific initialisation prior to main thread being
         setup */
 +    TS2("classlibThreadPreInit");
      main_group = classlibThreadPreInit(thread_class, thrdGrp_class);
--    if(main_group == NULL)
-+    if(main_group == NULL) {
-+        jam_fprintf(stderr, "[jamvm] threadinit: classlibThreadPreInit failed\n");
+     if(main_group == NULL)
          goto error;
-+    }
  
      /* Initialise the Java-level thread objects for the main thread */
 +    TS2("initJavaThread");
      java_thread = initJavaThread(&main_thread, FALSE, "main", main_group);
--    if(java_thread == NULL)
-+    if(java_thread == NULL) {
-+        jam_fprintf(stderr, "[jamvm] threadinit: initJavaThread failed\n");
+     if(java_thread == NULL)
          goto error;
-+    }
- 
-     classlibSetThreadState(&main_thread, RUNNING);
+@@ -1391,20 +1593,30 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Setup signal handling.  This will be inherited by all
         threads created within Java */
--    if(!initialiseSignals())
 +    TS2("initialiseSignals");
-+    if(!initialiseSignals()) {
-+        jam_fprintf(stderr, "[jamvm] threadinit: initialiseSignals failed\n");
+     if(!initialiseSignals())
          goto error;
-+    }
  
      /* Classlib specific initialisation once main thread has been
         setup */
--    if(!classlibThreadPostInit())
 +    TS2("classlibThreadPostInit");
-+    if(!classlibThreadPostInit()) {
-+        jam_fprintf(stderr, "[jamvm] threadinit: classlibThreadPostInit "
-+                            "(System.initializeSystemClass) failed\n");
+     if(!classlibThreadPostInit())
          goto error;
-+    }
 +    TS2("createVMThread(Signal Handler)");
  
      /* Create the signal handler thread.  It is responsible for
@@ -2607,7 +2722,7 @@ index e4fb7d1..c195ac1 100644
      return TRUE;
  
 diff --git a/src/zip.c b/src/zip.c
-index b901856..eb21865 100644
+index b901856..e7a9e68 100644
 --- a/src/zip.c
 +++ b/src/zip.c
 @@ -120,6 +120,10 @@ int zipComp(char *path1, char *path2) {
@@ -2621,11 +2736,16 @@ index b901856..eb21865 100644
  ZipFile *processArchive(char *path) {
      unsigned char magic[SIG_LEN];
      unsigned char *data, *pntr;
-@@ -128,21 +132,42 @@ ZipFile *processArchive(char *path) {
+@@ -128,21 +132,47 @@ ZipFile *processArchive(char *path) {
      HashTable *hash_table;
      ZipFile *zip;
  
 -    if((fd = open(path, O_RDONLY)) == -1)
++#ifdef __amigaos4__
++    /* an -Xbootclasspath entry may arrive in the Unix-absolute Java form */
++    path = (char*)amigaPath(path);
++#endif
++
 +    if((fd = open(path, O_RDONLY)) == -1) {
 +#ifdef __amigaos4__
 +        DebugPrintF("[ZIP] open FAILED '%s'\n", path);
@@ -2672,7 +2792,7 @@ index b901856..eb21865 100644
  
      /* Locate the end of central directory record by searching backwards for
         the record signature. */
-@@ -216,7 +241,7 @@ ZipFile *processArchive(char *path) {
+@@ -216,7 +246,7 @@ ZipFile *processArchive(char *path) {
      return zip;
  
  error2:
