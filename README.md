@@ -150,7 +150,7 @@ the `src/` tree; build and run instructions are in
 ```
 src/amigaawt/     the sun.awt.amiga AWT toolkit (Java peers + JNI)
 src/niopatch/     NIO.2 provider patch for the Amiga path model
-src/fontconfig/   minimal fontconfig.properties for the font pipeline
+src/fontconfig/   fontconfig.properties + the Lucida fonts shipped in lib/fonts
 src/tools/        small native helpers (e.g. an input injector for GUI tests)
 tests/            self-verifying conformance + GUI test programs
 tools/            Docker image + build/package scripts

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Phase 5: assemble the Java-OS4 release -- an Installation Utility package.
 #
-# Runs in the javaos4-build container (has /opt/jdk8, the DejaVu fonts, and lha).
+# Runs in the javaos4-build container (has /opt/jdk8 and lha); the runtime fonts
+# come from the repo (src/fontconfig/fonts), not from the host.
 # Needs only the repo mounted at /work, with build/ already populated by the
 # build scripts (it gathers their outputs -- it does not compile anything).
 #
@@ -133,9 +134,20 @@ cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar "$RT/examples/"
 cp "$B/testsuite.zip" "$RT/examples/"
 
 # --- runtime: lib/ resources (read from java.home/lib) --------------------
+# lib/fonts must hold the JRE's own Lucida set, under the JRE's file names:
+# sun.font.FontUtilities derives isOpenJDK from whether LucidaSansRegular.ttf
+# exists there, and when it is missing SunFontManager.getDefaultFontFile()
+# stays null -- which is the file every logical font is composed from in
+# FontConfiguration.get2DCompositeFontInfo().  The DejaVu fonts we used to pull
+# off the build host therefore left the runtime with no usable font at all.
+# The fonts are vendored in-repo (src/fontconfig/fonts), so this no longer
+# depends on what the build host happens to have installed.
 cp "$PROJECT_ROOT/src/fontconfig/fontconfig.properties" "$RT/lib/"
-cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
-   /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf "$RT/lib/fonts/"
+for f in LucidaSansRegular.ttf LucidaSansDemiBold.ttf LucidaSansOblique.ttf \
+         LucidaSansDemiOblique.ttf LucidaTypewriterRegular.ttf \
+         LucidaTypewriterBold.ttf; do
+    cp "$PROJECT_ROOT/src/fontconfig/fonts/$f" "$RT/lib/fonts/"
+done
 for p in currency.data tzdb.dat calendars.properties content-types.properties \
          flavormap.properties hijrah-config-umalqura.properties \
          logging.properties net.properties psfontj2d.properties \
