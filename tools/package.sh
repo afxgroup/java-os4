@@ -116,6 +116,28 @@ cp "$JDK8/jre/lib/rt.jar" "$JDK8/jre/lib/charsets.jar" "$JDK8/jre/lib/jce.jar" \
 cp "$N/niopatch.zip"     "$RT/"
 cp "$B/amigatoolkit.zip" "$RT/"
 
+# --- runtime: lib/ext (the extension class loader's jars) ------------------
+# We shipped no lib/ext at all, and jce.jar is only the javax.crypto API: every
+# actual cipher lives in com.sun.crypto.provider, which ships ONLY in
+# lib/ext/sunjce_provider.jar.  java.security still lists SunJCE as
+# security.provider.5, so the provider was silently skipped and any
+# Cipher.getInstance("DES") died with "Cannot find any provider supporting DES".
+# classlibDefaultExtDirs() already resolves java.ext.dirs to <java.home>/lib/ext
+# (see the JamVM patch), so dropping the jars in is enough.
+#
+# Deliberately NOT shipped: sunec.jar and sunpkcs11.jar need native libraries
+# (libsunec.so / libj2pkcs11.so) we do not build, so shipping them would trade a
+# missing provider for a failing one; nashorn.jar (1.9M) and cldrdata.jar (3.7M)
+# are big and unused by default on 8 (java.locale.providers is JRE,SPI, which
+# reads localedata.jar); jaccess.jar is the Windows accessibility bridge.
+# meta-index is skipped on purpose too -- it is a load-time optimisation that
+# describes a lib/ext we do not reproduce.
+mkdir -p "$RT/lib/ext"
+for j in sunjce_provider.jar localedata.jar zipfs.jar dnsns.jar; do
+    cp "$JDK8/jre/lib/ext/$j" "$RT/lib/ext/" 2>/dev/null || \
+        echo "  WARN: missing $JDK8/jre/lib/ext/$j"
+done
+
 # JamVM -jar dispatch path requires jamvm.java.lang.JarLauncher to be available
 # on the boot class path.  In OpenJDK mode JamVM includes java.home/classes by
 # default, so compile and ship the class there.
