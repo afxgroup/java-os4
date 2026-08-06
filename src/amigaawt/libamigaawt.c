@@ -38,6 +38,8 @@ struct IntuitionIFace *IIntuition = NULL;
 struct GraphicsIFace *IGraphics = NULL;
 struct KeymapIFace *IKeymap = NULL;
 
+static APTR windowMutex = NULL;  /* for the open-window registry */
+
 static int ensure_libs(void) {
     if (IIntuition != NULL && IGraphics != NULL)
         return 1;
@@ -91,6 +93,10 @@ static int g_atexit_registered = 0;
 static void awt_atexit_cleanup(void)
 {
     int i;
+    if (windowMutex != NULL) {
+        IExec->FreeSysObject(ASOT_MUTEX, windowMutex);
+        windowMutex = NULL;
+    }
     if (IIntuition == NULL)
         return;
     for (i = 0; i < MAX_AWT_WINDOWS; i++) {
@@ -112,25 +118,25 @@ static void register_window(struct Window *win)
         g_atexit_registered = 1;
         atexit(awt_atexit_cleanup);
     }
-    IExec->Forbid();
+    IExec->ObtainMutex(windowMutex);
     for (i = 0; i < MAX_AWT_WINDOWS; i++)
         if (g_windows[i] == NULL) {
             g_windows[i] = win;
             break;
         }
-    IExec->Permit();
+    IExec->ReleaseMutex(windowMutex);
 }
 
 static void unregister_window(struct Window *win)
 {
     int i;
-    IExec->Forbid();
+    IExec->ObtainMutex(windowMutex);
     for (i = 0; i < MAX_AWT_WINDOWS; i++)
         if (g_windows[i] == win) {
             g_windows[i] = NULL;
             break;
         }
-    IExec->Permit();
+    IExec->ReleaseMutex(windowMutex);
 }
 
 static jlong do_open(JNIEnv *env, jint w, jint h, jstring title, int sizable)
@@ -140,6 +146,10 @@ static jlong do_open(JNIEnv *env, jint w, jint h, jstring title, int sizable)
     char *tcopy;
 
     if (!ensure_libs())
+        return 0;
+
+    windowMutex = IExec->AllocSysObjectTags(ASOT_MUTEX, TAG_DONE);
+    if (!windowMutex)
         return 0;
 
     /* Intuition keeps the title POINTER for the window's lifetime -- it must
