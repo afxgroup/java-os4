@@ -544,7 +544,7 @@ index 5433ff3..a8f7048 100644
      action(cb, signers, ## __VA_ARGS__)
  
 diff --git a/src/classlib/openjdk/classlib.h b/src/classlib/openjdk/classlib.h
-index 054afe4..d682e3b 100644
+index 054afe4..6d0f58c 100644
 --- a/src/classlib/openjdk/classlib.h
 +++ b/src/classlib/openjdk/classlib.h
 @@ -35,7 +35,12 @@ extern Object *classlibMarkThreadTerminated(Object *jThread);
@@ -560,7 +560,15 @@ index 054afe4..d682e3b 100644
  #define classlibRemoveThreadName() SYMBOL(removeThreadName)
  #define classlibExceptionHandlerName() SYMBOL(uncaughtExceptionHandler)
  
-@@ -109,8 +114,28 @@ extern Object *classlibCheckIfOnLoad(Frame *last);
+@@ -46,6 +51,7 @@ extern void classlibThreadName2Buff(Object *jThread, char *buffer,
+ 
+ extern int classlibInitialiseSignals();
+ extern void classlibSignalThread(Thread *self);
++extern void classlibSignalThreadExit(void);
+ 
+ /* Class */
+ 
+@@ -109,8 +115,28 @@ extern Object *classlibCheckIfOnLoad(Frame *last);
  
  /* Properties */
  
@@ -809,7 +817,7 @@ index 2391e61..fc8877e 100644
 +#endif
  
 diff --git a/src/classlib/openjdk/thread.c b/src/classlib/openjdk/thread.c
-index 71fc8aa..8a7c303 100644
+index 71fc8aa..0ee57ac 100644
 --- a/src/classlib/openjdk/thread.c
 +++ b/src/classlib/openjdk/thread.c
 @@ -160,6 +160,13 @@ void classlibSetThreadState(Thread *thread, int state) {
@@ -834,6 +842,41 @@ index 71fc8aa..8a7c303 100644
  }
  
  static sem_t signal_sem;
+@@ -179,6 +187,20 @@ void signalHandler(int sig) {
+     sem_post(&signal_sem);
+ }
+ 
++/*
++ * Set by classlibSignalThreadExit() so the loop below can return instead of
++ * waiting on the semaphore for a signal that will never come.  Without it the
++ * thread outlives every other one and clib4's exit(), which waits for all
++ * pthread children, wedges on it -- which is why this thread used to be left
++ * uncreated on AmigaOS altogether.
++ */
++static volatile sig_atomic_t signal_thread_exit = FALSE;
++
++void classlibSignalThreadExit(void) {
++    signal_thread_exit = TRUE;
++    sem_post(&signal_sem);
++}
++
+ void classlibSignalThread(Thread *self) {
+     int sig;
+ 
+@@ -187,6 +209,13 @@ void classlibSignalThread(Thread *self) {
+         do {
+             sem_wait(&signal_sem);
+ 
++            if(signal_thread_exit) {
++                /* Balance the disableSuspend0 above: shell() is about to tear
++                   this thread down and must not find it suspend-disabled. */
++                enableSuspend(self);
++                return;
++            }
++
+             for(sig = 0; sig < NSIG && !pending_signals[sig]; sig++);
+         } while(sig == NSIG);
+ 
 diff --git a/src/config.h b/src/config.h
 index dd2b875..08dffc6 100644
 --- a/src/config.h
@@ -917,7 +960,7 @@ index bf88d59..c663143 100644
          MethodBlock *mb = lookupMethod(excep->class, SYMBOL(printStackTrace),
                                                       SYMBOL(___V));
 diff --git a/src/init.c b/src/init.c
-index 32539cf..2f19960 100644
+index 32539cf..be30a93 100644
 --- a/src/init.c
 +++ b/src/init.c
 @@ -26,7 +26,8 @@
@@ -930,7 +973,7 @@ index 32539cf..2f19960 100644
  extern void initialisePlatform();
  
  unsigned long clampHeapLimit(long long limit) {
-@@ -34,6 +35,100 @@ unsigned long clampHeapLimit(long long limit) {
+@@ -34,6 +35,109 @@ unsigned long clampHeapLimit(long long limit) {
      return (unsigned long)MIN(clamp, MAX_MAX_HEAP);
  }
  
@@ -953,12 +996,15 @@ index 32539cf..2f19960 100644
 +   forever and can't be async-stopped (clib4 pthread_kill only Signal()s a raw
 +   Exec bit, never running the sigaction handler).  Cooperative fix: tell the
 +   finalizer/reference-handler threads to exit (terminateVMThreads notifies their
-+   condvars; vm_exiting makes the loops return), and skip the signal-handler thread
-+   entirely on AmigaOS (see thread.c).  With the daemons exiting, clib4 exit() can
-+   complete cleanly.  Output already went out via raw write() syscalls. */
++   condvars; vm_exiting makes the loops return), and release the signal-handler
++   thread from its semaphore (classlibSignalThreadExit).  That thread used to be
++   skipped altogether here for want of an exit path, which is what left Ctrl-C
++   with nowhere to go.  With the daemons exiting, clib4 exit() can complete
++   cleanly.  Output already went out via raw write() syscalls. */
 +extern void terminateVMThreads(void);
 +extern void exitWakeAllThreads(void);
 +extern void exitDumpRemainingThreads(void);
++extern void classlibSignalThreadExit(void);
 +extern int getThreadsCount(void);
 +extern void realAmigaExit(int error);
 +
@@ -974,6 +1020,12 @@ index 32539cf..2f19960 100644
 +
 +    DebugPrintF("[EXIT] amiga_exit(%d): terminating VM threads\n", status);
 +    terminateVMThreads();
++
++    /* The Signal Handler thread parks on a semaphore, not on Object.wait, so
++       terminateVMThreads/exitWakeAllThreads below cannot reach it.  Release it
++       explicitly or the drain loop spins out its 300 tries and clib4's exit()
++       then waits forever for the pthread. */
++    classlibSignalThreadExit();
 +
 +    /* Wake every remaining Java thread (EDT, AWT pump, Disposer, ...) out of
 +       Object.wait/sleep; they self-terminate at the next dispatch poll
@@ -1031,7 +1083,7 @@ index 32539cf..2f19960 100644
  /* Setup default values for command line args */
  
  void setDefaultInitArgs(InitArgs *args) {
-@@ -65,9 +160,17 @@ void setDefaultInitArgs(InitArgs *args) {
+@@ -65,9 +169,17 @@ void setDefaultInitArgs(InitArgs *args) {
  
      args->props_count = 0;
  
@@ -1049,7 +1101,7 @@ index 32539cf..2f19960 100644
  
  #ifdef INLINING
      args->replication_threshold = 10;
-@@ -89,34 +192,46 @@ int VMInitialising() {
+@@ -89,34 +201,46 @@ int VMInitialising() {
      return VM_initing;
  }
  
@@ -2368,7 +2420,7 @@ index b453d7b..9793439 100644
      setOSProperties(properties);
      setUserDirProperty(properties);
 diff --git a/src/thread.c b/src/thread.c
-index e4fb7d1..2896d91 100644
+index e4fb7d1..f52bb24 100644
 --- a/src/thread.c
 +++ b/src/thread.c
 @@ -110,6 +110,12 @@ static int threads_waiting_to_start = 0;
@@ -2625,7 +2677,29 @@ index e4fb7d1..2896d91 100644
  
  static void suspendHandler(int sig) {
      Thread *thread = threadSelf();
-@@ -1234,6 +1395,21 @@ Object *runningThreadObjects() {
+@@ -1138,8 +1299,21 @@ static void initialiseSignalMask() {
+     sigset_t mask;
+ 
+     sigemptyset(&mask);
++#ifndef __amigaos4__
++    /* Blocking these is right for the gnuclasspath classlib, whose signal
++       thread consumes them with sigwait() -- there the block is what makes the
++       sigwait work.  It is WRONG for the openjdk classlib, which instead
++       installs ordinary sigaction handlers (classlibInitialiseSignals for
++       SIGQUIT, JVM_RegisterSignal for whatever java.lang.Terminator asks for,
++       i.e. SIGINT): a blocked signal never reaches its handler, and nothing
++       here ever unblocks them again -- the only other sigmask calls in this
++       file are enable/disableSuspend, and those touch SIGUSR1 alone.
++       Ctrl-C was therefore dropped before it could do anything, which on
++       AmigaOS meant no way at all to interrupt a running program. */
+     sigaddset(&mask, SIGQUIT);
+     sigaddset(&mask, SIGINT);
++#endif
++    /* SIGPIPE stays blocked everywhere: we want EPIPE from write(), not death. */
+     sigaddset(&mask, SIGPIPE);
+     sigprocmask(SIG_BLOCK, &mask, NULL);
+ }
+@@ -1234,6 +1408,21 @@ Object *runningThreadObjects() {
  
  void exitVM(int status) {
      main_exited = TRUE;
@@ -2647,7 +2721,7 @@ index e4fb7d1..2896d91 100644
  
      /* Execute System.exit() to run any registered shutdown hooks.
         In the unlikely event that System.exit() can't be found, or
-@@ -1248,22 +1424,37 @@ void exitVM(int status) {
+@@ -1248,22 +1437,37 @@ void exitVM(int status) {
          }
      }
  
@@ -2685,7 +2759,7 @@ index e4fb7d1..2896d91 100644
  }
  
  void mainThreadSetContextClassLoader(Object *loader) {
-@@ -1324,6 +1515,13 @@ int initialiseThreadStage1(InitArgs *args) {
+@@ -1324,6 +1528,13 @@ int initialiseThreadStage1(InitArgs *args) {
      return TRUE;
  }
  
@@ -2699,7 +2773,7 @@ index e4fb7d1..2896d91 100644
  int initialiseThreadStage2(InitArgs *args) {
      Class *thrdGrp_class;
      Object *main_group, *java_thread;
-@@ -1332,9 +1530,11 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1332,9 +1543,11 @@ int initialiseThreadStage2(InitArgs *args) {
      MethodBlock *run, *remove_thread;
  
      /* Load thread class and register reference for compaction threading */
@@ -2711,7 +2785,7 @@ index e4fb7d1..2896d91 100644
      registerStaticClassRef(&thread_class);
  
      name = findField(thread_class, SYMBOL(name), classlibThreadNameType());
-@@ -1378,11 +1578,13 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1378,11 +1591,13 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Classlib specific initialisation prior to main thread being
         setup */
@@ -2725,7 +2799,7 @@ index e4fb7d1..2896d91 100644
      java_thread = initJavaThread(&main_thread, FALSE, "main", main_group);
      if(java_thread == NULL)
          goto error;
-@@ -1391,20 +1593,30 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1391,19 +1606,33 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Setup signal handling.  This will be inherited by all
         threads created within Java */
@@ -2745,17 +2819,20 @@ index e4fb7d1..2896d91 100644
         (user-termination of the VM, e.g. via Ctrl-C).  Note it
         must be a valid Java-level thread as it needs to run the
         shutdown hooks in the event of user-termination */
-+#ifndef __amigaos4__
++    /* This used to be skipped on AmigaOS, on the grounds that it blocks forever
++       in sigwait() and so could not be shut down without hanging clib4's exit().
++       That reasoning belongs to the gnuclasspath classlib: the openjdk one we
++       build does not sigwait at all, it waits on a POSIX semaphore that
++       signalHandler() posts from whichever thread took the signal.  Without the
++       thread, nothing ever drains pending_signals[] and Ctrl-C went nowhere even
++       once the mask above stopped swallowing it.
++       The shutdown objection was real though, so the loop now has an exit:
++       amiga_exit() calls classlibSignalThreadExit() before draining the thread
++       count, and shell() already unlinks a helper thread whose loop returns
++       while vm_exiting. */
      createVMThread("Signal Handler", classlibSignalThread);
-+#else
-+    /* AmigaOS/clib4: skip the signal-handler thread.  It blocks forever in
-+       sigwait() (cross-thread signal delivery is broken on clib4), so it can't
-+       be cleanly shut down and would hang clib4 exit().  SIGQUIT/SIGINT (Ctrl-C)
-+       handling isn't needed for the headless qemu/Run workflow. */
-+#endif
  
      return TRUE;
- 
 diff --git a/src/zip.c b/src/zip.c
 index b901856..e7a9e68 100644
 --- a/src/zip.c
