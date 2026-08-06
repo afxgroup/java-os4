@@ -11,12 +11,15 @@
 #   make -f Makefile.local toolkit       build the sun.awt.amiga toolkit + test zips
 #   make -f Makefile.local tests         build the VM test suite + bundled examples
 #   make -f Makefile.local test-charset  host-compile + run the Amiga charset-name unit test
+#   make -f Makefile.local test-classpath host-compile + run the Amiga classpath unit test
+#   make -f Makefile.local test-path     host-compile + run the Amiga path-conversion unit test
 #   make -f Makefile.local awttest       compile examples/AWT1.java and package awttest.jar correctly
 #   make -f Makefile.local boot-jdk      download Temurin JDK 8 locally into build/boot-jdk8
 #   make -f Makefile.local build         vm + natives + toolkit + tests
 #   make -f Makefile.local dist          assemble the install tree + the .lha release  (alias: lha)
 #   make -f Makefile.local release       build everything, then dist
 #   make -f Makefile.local clean-dist    remove build/release and the .lha
+#   make -f Makefile.local clean    	 remove build and the .lha
 
 include config.mk
 
@@ -38,7 +41,7 @@ BOOT_JDK ?= $(if $(wildcard $(CURDIR)/build/boot-jdk8/bin/javah),$(CURDIR)/build
 SCRIPT_ENV = PROJECT_ROOT="$(CURDIR)" BUILD_ROOT="$(CURDIR)/build" BOOT_JDK="$(BOOT_JDK)" \
 	SDK_BASE="$(SDK_BASE)" SDK_CLIB4="$(SDK_CLIB4)" OPENJDK8_SRC="$(OPENJDK8_SRC)"
 
-.PHONY: vendor clib4 check-local boot-jdk vm natives toolkit tests test-charset awttest build dist lha release clean-dist help
+.PHONY: vendor clib4 check-local boot-jdk vm natives toolkit tests test-charset test-classpath test-path awttest build dist lha release clean-dist help
 
 help:
 	@sed -n 's/^#   //p' Makefile.local
@@ -85,6 +88,12 @@ tests: check-local
 test-charset:
 	mkdir -p build && cc tools/test-amiga-charset.c -o build/test-amiga-charset && build/test-amiga-charset
 
+test-classpath:
+	mkdir -p build && cc tools/test-amiga-classpath.c -o build/test-amiga-classpath && build/test-amiga-classpath
+
+test-path:
+	mkdir -p build && cc tools/test-amiga-path.c -o build/test-amiga-path && build/test-amiga-path
+
 awttest:
 	mkdir -p build/examples examples
 	"$(BOOT_JDK)/bin/javac" -source 8 -target 8 -d build examples/AWT1.java
@@ -99,6 +108,9 @@ dist: check-local
 lha: dist
 
 release: build dist
+
+clean:
+	rm -rf build $(LHA)
 
 clean-dist:
 	rm -rf build/release $(LHA)

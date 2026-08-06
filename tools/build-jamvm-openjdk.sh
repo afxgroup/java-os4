@@ -56,7 +56,7 @@ done
 # JAVA:) now lives in classlib/openjdk/properties.c itself (via the docs patch);
 # no build-time source injection needed here anymore.
 
-INC="-I . -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib/openjdk"
+INC="-I . -I $PROJECT_ROOT/src/jamvm -I $PROJECT_ROOT/src/openjdk -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib/openjdk"
 # VERSION_* are JamVM's version (2.0.1), normally from config.h; the openjdk
 # classlib's jvm.c (JVM_GetVersionInfo) needs them (gnuclasspath has no jvm.c).
 # -fPIC: the VM objects go into the shared libjvm.so (see linking section).

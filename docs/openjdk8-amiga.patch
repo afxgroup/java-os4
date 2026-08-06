@@ -50,7 +50,7 @@ index c13bb7794e..d52a811a89 100644
  #include <math.h>
  #define ISNANF(f) _isnanf(f)
 diff --git a/jdk/src/solaris/native/java/io/UnixFileSystem_md.c b/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
-index 225e23f8dd..716576f0eb 100644
+index 225e23f8dd..044b83ccce 100644
 --- a/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
 +++ b/jdk/src/solaris/native/java/io/UnixFileSystem_md.c
 @@ -42,7 +42,7 @@
@@ -124,6 +124,42 @@ index 225e23f8dd..716576f0eb 100644
              rv = sb.st_size;
          }
      } END_PLATFORM_STRING(env, path);
+@@ -272,7 +278,7 @@ Java_java_io_UnixFileSystem_delete0(JNIEnv *env, jobject this,
+     jboolean rv = JNI_FALSE;
+ 
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+-        if (remove(path) == 0) {
++        if (remove(amiga_path(path)) == 0) {
+             rv = JNI_TRUE;
+         }
+     } END_PLATFORM_STRING(env, path);
+@@ -295,7 +301,7 @@ Java_java_io_UnixFileSystem_list(JNIEnv *env, jobject this,
+     CHECK_NULL_RETURN(str_class, NULL);
+ 
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+-        dir = opendir(path);
++        dir = opendir(amiga_path(path));
+     } END_PLATFORM_STRING(env, path);
+     if (dir == NULL) return NULL;
+ 
+@@ -361,7 +367,7 @@ Java_java_io_UnixFileSystem_createDirectory(JNIEnv *env, jobject this,
+     jboolean rv = JNI_FALSE;
+ 
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+-        if (mkdir(path, 0777) == 0) {
++        if (mkdir(amiga_path(path), 0777) == 0) {
+             rv = JNI_TRUE;
+         }
+     } END_PLATFORM_STRING(env, path);
+@@ -377,7 +383,7 @@ Java_java_io_UnixFileSystem_rename0(JNIEnv *env, jobject this,
+ 
+     WITH_FIELD_PLATFORM_STRING(env, from, ids.path, fromPath) {
+         WITH_FIELD_PLATFORM_STRING(env, to, ids.path, toPath) {
+-            if (rename(fromPath, toPath) == 0) {
++            if (amiga_rename(amiga_path(fromPath), amiga_path(toPath)) == 0) {
+                 rv = JNI_TRUE;
+             }
+         } END_PLATFORM_STRING(env, toPath);
 @@ -394,11 +400,15 @@ Java_java_io_UnixFileSystem_setLastModifiedTime(JNIEnv *env, jobject this,
      WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
          struct stat64 sb;
@@ -142,6 +178,24 @@ index 225e23f8dd..716576f0eb 100644
              tv[0].tv_sec = sb.st_atim.tv_sec;
              tv[0].tv_usec = sb.st_atim.tv_nsec / 1000;
  #else
+@@ -410,7 +420,7 @@ Java_java_io_UnixFileSystem_setLastModifiedTime(JNIEnv *env, jobject this,
+             tv[1].tv_sec = time / 1000;
+             tv[1].tv_usec = (time % 1000) * 1000;
+ 
+-            if (utimes(path, tv) == 0)
++            if (utimes(amiga_path(path), tv) == 0)
+                 rv = JNI_TRUE;
+         }
+     } END_PLATFORM_STRING(env, path);
+@@ -445,7 +455,7 @@ Java_java_io_UnixFileSystem_getSpace(JNIEnv *env, jobject this,
+     WITH_FIELD_PLATFORM_STRING(env, file, ids.path, path) {
+         struct statvfs64 fsstat;
+         memset(&fsstat, 0, sizeof(fsstat));
+-        if (statvfs64(path, &fsstat) == 0) {
++        if (statvfs64(amiga_path(path), &fsstat) == 0) {
+             switch(t) {
+             case java_io_FileSystem_SPACE_TOTAL:
+                 rv = jlong_mul(long_to_jlong(fsstat.f_frsize),
 diff --git a/jdk/src/solaris/native/java/io/io_util_md.c b/jdk/src/solaris/native/java/io/io_util_md.c
 index 0dee96b890..ee055df920 100644
 --- a/jdk/src/solaris/native/java/io/io_util_md.c
@@ -222,9 +276,18 @@ index b03bd6ac8f..5432194c22 100644
  #ifdef __linux__
          /*
 diff --git a/jdk/src/solaris/native/java/util/FileSystemPreferences.c b/jdk/src/solaris/native/java/util/FileSystemPreferences.c
-index 757f64c34f..38448cec73 100644
+index 757f64c34f..f8fd7999b3 100644
 --- a/jdk/src/solaris/native/java/util/FileSystemPreferences.c
 +++ b/jdk/src/solaris/native/java/util/FileSystemPreferences.c
+@@ -41,7 +41,7 @@ Java_java_util_prefs_FileSystemPreferences_chmod(JNIEnv *env,
+     const char *fname = JNU_GetStringPlatformChars(env, java_fname, NULL);
+     int result = -1;
+     if (fname) {
+-        result =  chmod(fname, permission);
++        result =  chmod(amiga_path(fname), permission);
+         if (result != 0)
+             result = errno;
+         JNU_ReleaseStringPlatformChars(env, java_fname, fname);
 @@ -49,7 +49,7 @@ Java_java_util_prefs_FileSystemPreferences_chmod(JNIEnv *env,
      return (jint) result;
  }
@@ -234,6 +297,19 @@ index 757f64c34f..38448cec73 100644
  typedef struct flock FLOCK;
  #else
  typedef struct flock64 FLOCK;
+@@ -83,10 +83,10 @@ Java_java_util_prefs_FileSystemPreferences_lockFile0(JNIEnv *env,
+     }
+ 
+     if (shared == JNI_TRUE) {
+-        fd = open(fname, O_RDONLY, 0);
++        fd = open(amiga_path(fname), O_RDONLY, 0);
+     } else {
+         old_umask = umask(0);
+-        fd = open(fname, O_WRONLY|O_CREAT, permission);
++        fd = open(amiga_path(fname), O_WRONLY|O_CREAT, permission);
+         result[1] = errno;
+         umask(old_umask);
+     }
 @@ -94,7 +94,7 @@ Java_java_util_prefs_FileSystemPreferences_lockFile0(JNIEnv *env,
      if (fd < 0) {
          result[0] = 0;
@@ -349,6 +425,19 @@ index 9b3ff8194e..c6eab08e6a 100644
  #define lseek64 lseek
  #define stat64 stat
  #define flock64 flock
+diff --git a/jdk/src/solaris/native/sun/nio/ch/FileKey.c b/jdk/src/solaris/native/sun/nio/ch/FileKey.c
+index bdb42a6324..fbafcc0548 100644
+--- a/jdk/src/solaris/native/sun/nio/ch/FileKey.c
++++ b/jdk/src/solaris/native/sun/nio/ch/FileKey.c
+@@ -30,7 +30,7 @@
+ #include "nio_util.h"
+ #include "sun_nio_ch_FileKey.h"
+ 
+-#ifdef _ALLBSD_SOURCE
++#if defined(_ALLBSD_SOURCE) || defined(__amigaos4__)
+ #define stat64 stat
+ 
+ #define fstat64 fstat
 diff --git a/jdk/src/solaris/native/sun/nio/ch/NativeThread.c b/jdk/src/solaris/native/sun/nio/ch/NativeThread.c
 index 5e2a78b7af..b75f426b9c 100644
 --- a/jdk/src/solaris/native/sun/nio/ch/NativeThread.c
@@ -374,7 +463,7 @@ index 5e2a78b7af..b75f426b9c 100644
  
  static void
 diff --git a/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c b/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c
-index cb4cfc0190..923b36264b 100644
+index cb4cfc0190..6dece29a7e 100644
 --- a/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c
 +++ b/jdk/src/solaris/native/sun/nio/fs/UnixNativeDispatcher.c
 @@ -46,7 +46,7 @@
@@ -572,7 +661,7 @@ index cb4cfc0190..923b36264b 100644
  
      if (my_unlinkat_func == NULL) {
          JNU_ThrowInternalError(env, "should not reach here");
-@@ -803,8 +803,8 @@ JNIEXPORT void JNICALL
+@@ -803,11 +803,11 @@ JNIEXPORT void JNICALL
  Java_sun_nio_fs_UnixNativeDispatcher_rename0(JNIEnv* env, jclass this,
      jlong fromAddress, jlong toAddress)
  {
@@ -582,7 +671,11 @@ index cb4cfc0190..923b36264b 100644
 +    const char* to = amiga_path((const char*)jlong_to_ptr(toAddress));
  
      /* EINTR not listed as a possible error */
-     if (rename(from, to) == -1) {
+-    if (rename(from, to) == -1) {
++    if (amiga_rename(from, to) == -1) {
+         throwUnixException(env, errno);
+     }
+ }
 @@ -816,8 +816,8 @@ JNIEXPORT void JNICALL
  Java_sun_nio_fs_UnixNativeDispatcher_renameat0(JNIEnv* env, jclass this,
      jint fromfd, jlong fromAddress, jint tofd, jlong toAddress)

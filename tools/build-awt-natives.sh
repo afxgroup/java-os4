@@ -282,3 +282,37 @@ else
 fi
 echo "  undefined check:"; ppc-amigaos-nm -D -u "$OUT/libfontmanager.so" 2>/dev/null \
     | grep -vE "Jam_|JVM_|JNU_|JNI_|jio_|jvm|__|mem|str|malloc|free|calloc|realloc|printf|sprintf|fprintf|qsort|getenv|sqrt|floor|ceil|pow|abs|fopen|fclose|fread|fseek|ftell|fflush|sscanf|longjmp|setjmp" | head -8
+
+echo "=== liblcms.so (Little CMS colour management) ==="
+# sun.java2d.cmm.lcms.LCMS is what java.awt.color.ICC_Profile ultimately calls:
+# ProfileDeferralMgr.activateProfiles -> CMSManager.getModule -> LCMS.getModule
+# -> System.loadLibrary("lcms").  Without it every ICC_Profile use dies with
+# "no lcms in java.library.path", which takes out ColorConvertOp and anything
+# doing image work -- shipping lib/cmm/*.pf alone was not enough.
+# LittleCMS itself is bundled in the OpenJDK drop, so this is a plain build.
+LCMSSRC=$SH/java2d/cmm/lcms
+LCMSINC="-I $HDR -I $COMPAT -I $LCMSSRC \
+ -I $J/src/share/javavm/export -I $J/src/solaris/javavm/export \
+ -I $J/src/share/native/common -I $J/src/solaris/native/common \
+ -I $SH/java2d -I $SH/awt/debug \
+ -include $COMPAT/jdkdefs.h"
+
+"$BOOT_JDK/bin/javah" -d "$HDR" -classpath "$RTJAR" sun.java2d.cmm.lcms.LCMS >/dev/null 2>&1 || true
+
+mkdir -p "$OUT/liblcms"
+lok=0; lfail=0
+for c in "$LCMSSRC"/*.c; do
+    if $CC $LCMSINC -c "$c" -o "$OUT/liblcms/$(basename "$c" .c).o" 2>"$OUT/e"; then
+        lok=$((lok+1))
+    else
+        lfail=$((lfail+1)); echo "  LCMS FAIL $(basename "$c")"
+        grep -m2 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
+    fi
+done
+echo "  liblcms compile: $lok OK, $lfail FAILED"
+if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
+       -o "$OUT/liblcms.so" "$OUT"/liblcms/*.o -lm 2>"$OUT/e"; then
+    echo "  liblcms.so OK ($(wc -c < "$OUT/liblcms.so") bytes)"
+else
+    echo "  liblcms.so LINK FAIL"; head -10 "$OUT/e"
+fi

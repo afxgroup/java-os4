@@ -62,7 +62,7 @@ cp "$B/libjvm.so"     "$RT/"
 
 # --- runtime: OpenJDK + AWT natives ---------------------------------------
 for so in libjava libverify libzip libnio libnet \
-          libawt libfontmanager libamigaawt; do
+          libawt libfontmanager libamigaawt liblcms; do
     cp "$N/$so.so" "$RT/"
 done
 
@@ -143,6 +143,54 @@ for p in currency.data tzdb.dat calendars.properties content-types.properties \
     cp "$JDK8/jre/lib/$p" "$RT/lib/" 2>/dev/null || true
 done
 
+# --- runtime: lib/cmm (ICC colour profiles) --------------------------------
+# java.awt.color.ICC_Profile loads these by name from <java.home>/lib/cmm.  Miss
+# them and ColorSpace.getInstance(CS_GRAY) throws "Can't load standard profile:
+# GRAY.pf", which surfaces as an ExceptionInInitializerError out of anything
+# doing image work -- it was killing Invoicex's splash screen through imgscalr.
+mkdir -p "$RT/lib/cmm"
+cp "$JDK8/jre/lib/cmm/"*.pf "$RT/lib/cmm/"
+
+# --- runtime: lib/security ------------------------------------------------
+# JCE refuses to start without these.  javax.crypto.JceSecurity's class
+# initialiser calls setupJurisdictionPolicies(), which looks for the policy jars
+# under <java.home>/lib/security (falling back to policy/unlimited when the
+# crypto.policy property is unset, as it is in stock java.security); if they are
+# missing it throws "Cannot locate policy or framework files!", which surfaces as
+# an ExceptionInInitializerError from anything touching Cipher -- including
+# SSLContext.getInstance().  java.security itself matters too: without it
+# java.security.Security falls back to a hardcoded six-provider list and every
+# other setting in that file is silently lost.  cacerts is what makes TLS trust
+# work at all.
+mkdir -p "$RT/lib/security"
+for f in java.security java.policy blacklisted.certs cacerts; do
+    cp "$JDK8/jre/lib/security/$f" "$RT/lib/security/"
+done
+cp -r "$JDK8/jre/lib/security/policy" "$RT/lib/security/"
+
+# AmigaOS has no /dev/random or /dev/urandom; it has the RANDOM: DOS device.
+# sun.security.provider.SeedGenerator opens securerandom.source eagerly and falls
+# back to the (much slower) ThreadedSeedGenerator if that fails, so this is safe
+# even on a system without RANDOM: -- it just gets used when present.  The URL
+# must be "file:/RANDOM:", not "file:RANDOM:": SunEntries.getDeviceFile() treats
+# a URI whose scheme-specific part does not start with '/' as opaque and
+# resolves it against user.dir.  The leading '/' is the same Unix-absolute
+# spelling used everywhere else here; amigaPath() strips it before the open.
+sed -i 's|^securerandom.source=file:/dev/random$|securerandom.source=file:/RANDOM:|' \
+    "$RT/lib/security/java.security"
+grep -q '^securerandom.source=file:/RANDOM:$' "$RT/lib/security/java.security" \
+    || { echo "Failed to point securerandom.source at RANDOM:"; exit 1; }
+
+# Same assumption, second place: SecureRandom.getInstanceStrong() resolves
+# securerandom.strongAlgorithms, and NativePRNGBlocking only registers when
+# /dev/urandom exists -- so on AmigaOS every caller of getInstanceStrong() would
+# get NoSuchAlgorithmException.  SHA1PRNG is always present, and now seeds from
+# RANDOM: through securerandom.source above.
+sed -i 's|^securerandom.strongAlgorithms=NativePRNGBlocking:SUN$|securerandom.strongAlgorithms=SHA1PRNG:SUN|' \
+    "$RT/lib/security/java.security"
+grep -q '^securerandom.strongAlgorithms=SHA1PRNG:SUN$' "$RT/lib/security/java.security" \
+    || { echo "Failed to set securerandom.strongAlgorithms"; exit 1; }
+
 # --- runtime: version + README --------------------------------------------
 echo "$VER" > "$RT/VERSION"
 cat > "$RT/README" <<README
@@ -173,6 +221,54 @@ than Java 8 is rejected up front with UnsupportedClassVersionError.
 
 Licensing: JamVM GPLv2; OpenJDK 8 GPLv2 + Classpath exception.
 README
+
+# --- unresolved-symbol check ----------------------------------------------
+# The AmigaOS ELF loader binds lazily, so a symbol nothing provides does NOT
+# fail the link or the load: it kills the running process the first time that
+# code path is reached ("unable to resolve symbol fstat64 in libnio.so", which is
+# how FileKey.c's missing LFS mapping surfaced -- long after the build was green).
+# Check the whole shipped set against everything that will be loaded with it, and
+# report anything new.  KNOWN_MISSING lists the gaps we accept, with a reason;
+# anything outside it is a regression worth looking at before release.
+KNOWN_MISSING="
+BZ2_bzDecompress BZ2_bzDecompressEnd BZ2_bzDecompressInit BrotliDecoderDecompress
+png_create_info_struct png_create_read_struct png_destroy_read_struct png_error
+png_get_IHDR png_get_error_ptr png_get_io_ptr png_get_valid png_read_end
+png_read_image png_read_info png_read_update_info png_set_expand_gray_1_2_4_to_8
+png_set_filler png_set_gray_to_rgb png_set_interlace_handling png_set_longjmp_fn
+png_set_packing png_set_palette_to_rgb png_set_read_fn
+png_set_read_user_transform_fn png_set_strip_16 png_set_tRNS_to_alpha
+fork vfork
+"
+# libfontmanager: freetype's optional PNG (colour-emoji bitmaps), bzip2 and WOFF2
+#   paths.  Unreachable with the TrueType fonts we ship; fixing them means
+#   bundling libpng/libbz2/brotli.
+# fork/vfork: clib4 has neither, so java.lang.ProcessBuilder cannot work at all.
+SYMS_PROVIDED=$B/.syms-provided
+SYMS_NEEDED=$B/.syms-needed
+: > "$SYMS_PROVIDED"
+for so in "$SOBJ"/*.so* "$RT"/lib*.so "$RT"/libjvm.so; do
+    [ -f "$so" ] || continue
+    ppc-amigaos-nm -D --defined-only "$so" 2>/dev/null \
+        | awk 'NF>1 && $2!="U" {print $NF}' >> "$SYMS_PROVIDED"
+done
+# resolved by the clib4 startup / SDK auto-open rather than by any .so
+printf '%s\n' IExec IDOS IIntuition IGraphics IUtility __errno __ctype_ptr \
+    __environ __stdin __stdout __stderr $KNOWN_MISSING >> "$SYMS_PROVIDED"
+LC_ALL=C sort -u "$SYMS_PROVIDED" -o "$SYMS_PROVIDED"
+
+unresolved=0
+for so in "$RT"/lib*.so; do
+    ppc-amigaos-nm -u "$so" 2>/dev/null | awk '{print $NF}' | LC_ALL=C sort -u > "$SYMS_NEEDED"
+    miss=$(LC_ALL=C comm -23 "$SYMS_NEEDED" "$SYMS_PROVIDED")
+    if [ -n "$miss" ]; then
+        echo "WARNING: $(basename "$so") references symbols nothing provides:"
+        echo "$miss" | sed 's/^/    /'
+        unresolved=1
+    fi
+done
+rm -f "$SYMS_PROVIDED" "$SYMS_NEEDED"
+[ "$unresolved" = 0 ] && echo "=== symbol check: all shipped .so resolve (bar the known gaps) ==="
 
 # --- installer (Installation Utility / Python 2.5) ------------------------
 sed -e "s/@VERSION@/$VER/g" -e "s/@DATE@/$DATE/g" \

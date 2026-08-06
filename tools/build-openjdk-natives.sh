@@ -41,6 +41,7 @@ echo '#include <signal.h>' > "$COMPAT/sys/signal.h"   # clib4 has <signal.h>, no
 # force-included via jdkdefs.h below and called from java_props_md.c ParseLocale().
 # Tested on the host by tools/test-amiga-charset.c against the same header.
 cp "$PROJECT_ROOT/src/openjdk/amiga_charset.h" "$COMPAT/amiga_charset.h"
+cp "$PROJECT_ROOT/src/openjdk/amiga_path.h" "$COMPAT/amiga_path.h"
 # Self-test that normaliser on the HOST compiler before building libjava, so a
 # broken charset mapping fails the build fast (10 languages + edge cases).
 # Skipped (with a warning) if no host cc/gcc is present.
@@ -51,6 +52,14 @@ if [ -n "$HOSTCC" ]; then
         echo "=== amiga charset self-test PASSED ==="
     else
         echo "WARN: host-compile of test-amiga-charset.c failed; skipping self-test"; head -3 "$OUT/e"
+    fi
+    # Same for the path conversion -- every open/stat/mkdir/rename/dlopen goes
+    # through it, so a regression there breaks the runtime everywhere at once.
+    if "$HOSTCC" "$PROJECT_ROOT/tools/test-amiga-path.c" -o "$OUT/test-amiga-path" 2>"$OUT/e"; then
+        "$OUT/test-amiga-path" >/dev/null || { echo "FATAL: amiga path self-test FAILED"; "$OUT/test-amiga-path"; exit 1; }
+        echo "=== amiga path self-test PASSED ==="
+    else
+        echo "WARN: host-compile of test-amiga-path.c failed; skipping self-test"; head -3 "$OUT/e"
     fi
 fi
 # String-literal defines OpenJDK's makefiles pass via -D (ARCHPROPNAME, version);
@@ -99,45 +108,107 @@ static int amiga_oflags(int lf) {
     if (lf & 0200000)  f |= O_DIRECTORY;
     return f;
 }
-/* Amiga path normaliser for the clib4/AmigaDOS layer.  OpenJDK's java.io models
-   paths as Unix-absolute (leading '/'), but AmigaDOS uses "Volume:dir/file" with
-   NO leading '/'.  We present canonical paths to Java WITH a leading '/' (so
-   File.isAbsolute()/toURI() don't double the path), then strip it here before any
-   clib4 stat/open.  Also strips a leading "./" (AmigaDOS has no current-dir prefix)
-   and collapses a single ":/" after a volume/assign name: "JAVA:/lib/fonts" ->
-   "JAVA:lib/fonts", because "/" right after ":" is the parent of the volume root.
-   "/Volume:..." -> "Volume:...", "./x" -> "x", "RAM:x"/"x" unchanged. */
-static const char *amiga_path(const char *p) {
-    static __thread char buf[4096];
-    const char *src = p;
-    int i = 0;
+/* Java -> AmigaDOS path conversion.  Single source of truth in
+   src/openjdk/amiga_path.h (copied into $COMPAT above); tested on the host by
+   tools/test-amiga-path.c against that same header. */
+#include "amiga_path.h"
+/* POSIX rename() replaces an existing destination and works within any
+   filesystem.  On AmigaOS neither holds:
 
-    if (p == NULL)
-        return NULL;
+     - AmigaDOS Rename() fails with ERROR_OBJECT_EXISTS (EEXIST) when the
+       destination exists, and clib4 only papers over that when
+       __unix_path_semantics is on -- which it is NOT here (clib4 turns it on
+       only if PROGDIR:.unix exists, and we ship no such file).
+     - some handlers do not implement Rename at all.  ENV: is one: deleting the
+       destination first is not enough there, the rename itself is refused.
 
-    if (src[0] == '.' && src[1] == '/')
-        src += 2;
-    else if (src[0] == '/') {
-        const char *c = src + 1;
-        while (*c != 0 && *c != '/') {
-            if (*c == ':') {
-                src++;
-                break;
+   So: try rename; on EEXIST drop the destination and retry; and if it still
+   will not go, fall back to copy-then-delete-source, which is the only thing
+   such a handler leaves us.  The copy path is for regular files only -- never
+   silently "copy" a directory.
+
+   If the copy succeeds but the source cannot be removed we still report
+   success: the destination holds the right content, which is the whole point of
+   the write-temp-then-rename pattern, and a stray temp file is harmless.
+
+   Both arguments have already been through amiga_path(); nothing in here calls
+   it again, so the ring buffers they point at stay valid throughout. */
+#include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+static int amiga_copy_file(const char *from, const char *to) {
+    char buff[8192];
+    struct stat sb;
+    int in, out;
+    ssize_t got;
+
+    if (stat(from, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+        errno = EISDIR;
+        return -1;
+    }
+
+    if ((in = open(from, O_RDONLY)) < 0)
+        return -1;
+
+    if ((out = open(to, O_WRONLY | O_CREAT | O_TRUNC, sb.st_mode & 0777)) < 0) {
+        int saved = errno;
+        close(in);
+        errno = saved;
+        return -1;
+    }
+
+    while ((got = read(in, buff, sizeof(buff))) > 0) {
+        ssize_t done = 0;
+
+        while (done < got) {
+            ssize_t put = write(out, buff + done, got - done);
+
+            if (put <= 0) {
+                int saved = errno;
+                close(in);
+                close(out);
+                remove(to);
+                errno = saved;
+                return -1;
             }
-            c++;
+            done += put;
         }
     }
 
-    while (*src != 0 && i < (int)sizeof(buf) - 1) {
-        if (src[0] == ':' && src[1] == '/' && src[2] != '/') {
-            buf[i++] = ':';
-            src += 2;
-        } else {
-            buf[i++] = *src++;
-        }
+    if (got < 0) {
+        int saved = errno;
+        close(in);
+        close(out);
+        remove(to);
+        errno = saved;
+        return -1;
     }
-    buf[i] = '\0';
-    return buf;
+
+    close(in);
+    if (close(out) != 0) {
+        int saved = errno;
+        remove(to);
+        errno = saved;
+        return -1;
+    }
+
+    return 0;
+}
+static int amiga_rename(const char *from, const char *to) {
+    if (rename(from, to) == 0)
+        return 0;
+
+    if (errno == EEXIST && remove(to) == 0 && rename(from, to) == 0)
+        return 0;
+
+    /* the handler will not rename at all (ENV: and friends) -- copy instead */
+    if (amiga_copy_file(from, to) != 0)
+        return -1;
+
+    remove(from);
+    return 0;
 }
 /* Amiga "canonicalize": no symlinks to resolve in practice; just normalise to the
    AmigaDOS form (amiga_path) and present it back to Java WITH a leading '/' so
@@ -207,7 +278,28 @@ if [ -f "$UFS" ] && ! grep -q "amiga_path" "$UFS"; then
     sed -i 's@canonicalize((char \*)path,@amiga_canonicalize((char *)path,@' "$UFS"
     # other stat/access/chmod sites (getLastModified/getLength/checkAccess/setPermission)
     sed -i 's@stat64(path, &sb)@stat64(amiga_path(path), \&sb)@g; s@access(path, mode)@access(amiga_path(path), mode)@g; s@chmod(path, mode)@chmod(amiga_path(path), mode)@g' "$UFS"
+    # ...and every REMAINING path-taking call in this file.  Any one that is left
+    # raw hands AmigaDOS the Unix-absolute Java form and pops a "Please insert
+    # volume /Work:" requester -- File.list()/opendir() was the one that fired on
+    # a plain `java -jar App.jar` (the ext-dirs scan and the app's own File.list).
+    # rename() needs two live translations at once: amiga_path() rings its buffers.
+    sed -i 's@remove(path)@remove(amiga_path(path))@g;
+            s@opendir(path)@opendir(amiga_path(path))@g;
+            s@mkdir(path, 0777)@mkdir(amiga_path(path), 0777)@g;
+            s@rename(fromPath, toPath)@amiga_rename(amiga_path(fromPath), amiga_path(toPath))@g;
+            s@utimes(path, tv)@utimes(amiga_path(path), tv)@g;
+            s@statvfs64(path, &fsstat)@statvfs64(amiga_path(path), \&fsstat)@g' "$UFS"
     echo "=== adapted UnixFileSystem_md.c (amiga_path/amiga_canonicalize) ==="
+fi
+
+# FileSystemPreferences.c: java.util.prefs writes under user.home -- same story,
+# the Java side hands down the Unix-absolute "/Volume:..." form.
+FSP="$J/src/solaris/native/java/util/FileSystemPreferences.c"
+if [ -f "$FSP" ] && ! grep -q amiga_path "$FSP"; then
+    sed -i 's@chmod(fname, permission)@chmod(amiga_path(fname), permission)@g;
+            s@open(fname, O_RDONLY, 0)@open(amiga_path(fname), O_RDONLY, 0)@g;
+            s@open(fname, O_WRONLY|O_CREAT, permission)@open(amiga_path(fname), O_WRONLY|O_CREAT, permission)@g' "$FSP"
+    echo "=== adapted FileSystemPreferences.c (amiga_path) ==="
 fi
 
 # UnixFileSystem_md.c getLastModifiedTime(): clib4 struct stat uses st_mtime
@@ -561,6 +653,14 @@ if [ -f "$NT" ] && ! grep -q "INTERRUPT_SIGNAL SIGUSR2" "$NT"; then
     perl -0pi -e 's/#error "missing platform-specific definition here"/#include <pthread.h>\n  #include <signal.h>\n  #define INTERRUPT_SIGNAL SIGUSR2  \/* amiga: benign; not async *\//' "$NT"
     echo "  adapted NativeThread.c (amiga INTERRUPT_SIGNAL)"
 fi
+# UnixNativeDispatcher rename0: AmigaDOS Rename() will not replace an existing
+# destination -- see amiga_rename() in jdkdefs.h.  Files.move(REPLACE_EXISTING)
+# reaches AmigaDOS through here, so it needs the same treatment as java.io.
+if [ -f "$UND" ] && ! grep -q amiga_rename "$UND"; then
+    sed -i 's@if (rename(from, to) == -1)@if (amiga_rename(from, to) == -1)@' "$UND"
+    echo "  adapted UnixNativeDispatcher.c (amiga_rename)"
+fi
+
 # UnixNativeDispatcher open0/openat0: translate the Java-side (Linux-valued)
 # open flags to clib4's encoding.
 if [ -f "$UND" ] && ! grep -q amiga_oflags "$UND"; then
@@ -572,6 +672,18 @@ fi
 if [ -f "$UND" ] && ! grep -q "200809L) || defined(__solaris__)) && !defined(__amigaos4__)" "$UND"; then
     sed -i 's@#if (_POSIX_C_SOURCE >= 200809L) || defined(__solaris__)@#if ((_POSIX_C_SOURCE >= 200809L) || defined(__solaris__)) \&\& !defined(__amigaos4__)@' "$UND"
     echo "  adapted UnixNativeDispatcher.c (no st_atim nsec)"
+fi
+
+# FileKey.c maps the *64 LFS names onto the base ones under _ALLBSD_SOURCE only,
+# so on amiga it kept calling fstat64 -- which clib4 does not export (its base
+# APIs are already 64-bit).  libnio.so is linked without --no-undefined, so this
+# survived the build and only bit at runtime, as
+# "unable to resolve symbol fstat64 in libnio.so" when sun.nio.ch first mapped a
+# file.  Join the _ALLBSD_SOURCE branch, like the libjava md files above.
+FKEY="$NCH/FileKey.c"
+if [ -f "$FKEY" ] && ! grep -q __amigaos4__ "$FKEY"; then
+    sed -i 's@#ifdef _ALLBSD_SOURCE@#if defined(_ALLBSD_SOURCE) || defined(__amigaos4__)@g' "$FKEY"
+    echo "  adapted FileKey.c (amigaos LFS->base)"
 fi
 
 echo "  javah (nio classes from Temurin rt.jar)"
@@ -598,6 +710,91 @@ for c in "$NFS/UnixNativeDispatcher.c" "$NFS/UnixCopyFile.c" "$NFS/LinuxNativeDi
         grep -m2 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
     fi
 done
+# POSIX calls sun.nio.fs needs that clib4 does not have.  These are NOT dead
+# weight: the AmigaOS ELF loader resolves lazily, so a missing symbol is not a
+# load failure -- it kills the process the first time that code path runs, which
+# is exactly how "unable to resolve symbol fstat64 in libnio.so" showed up.
+# futimes/getgr*_r are implemented on top of what clib4 does have; mknod has no
+# equivalent and reports ENOSYS, which sun.nio.fs turns into an IOException.
+cat > "$OUT/libnio/posix_compat.c" <<'PEOF'
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <errno.h>
+#include <string.h>
+#include <grp.h>
+
+/* clib4 has futimens(fd, timespec[2]) but not futimes(fd, timeval[2]) */
+int futimes(int fd, const struct timeval tv[2]) {
+    struct timespec ts[2];
+
+    if (tv == NULL)
+        return futimens(fd, NULL);
+
+    ts[0].tv_sec  = tv[0].tv_sec;
+    ts[0].tv_nsec = (long)tv[0].tv_usec * 1000;
+    ts[1].tv_sec  = tv[1].tv_sec;
+    ts[1].tv_nsec = (long)tv[1].tv_usec * 1000;
+
+    return futimens(fd, ts);
+}
+
+/* clib4 has the non-reentrant getgrgid/getgrnam only.  AmigaOS is single-user
+   and these return a static, immediately-copied record, so wrapping them is
+   sound here; gr_mem is reported empty rather than deep-copied, which is all
+   sun.nio.fs.UnixUserPrincipals asks for (it reads gr_name/gr_gid). */
+static int amiga_copy_group(struct group *found, struct group *grp, char *buf,
+                            size_t buflen, struct group **result) {
+    size_t namelen;
+
+    *result = NULL;
+
+    if (found == NULL)
+        return 0;                      /* not found: no error, NULL result */
+
+    namelen = (found->gr_name != NULL) ? strlen(found->gr_name) + 1 : 1;
+    if (buflen < namelen + sizeof(char *))
+        return ERANGE;
+
+    grp->gr_gid = found->gr_gid;
+    grp->gr_name = buf;
+    if (found->gr_name != NULL)
+        memcpy(buf, found->gr_name, namelen);
+    else
+        buf[0] = '\0';
+
+    /* an empty, NULL-terminated member list placed after the name */
+    grp->gr_mem = (char **)(void *)(buf + namelen);
+    grp->gr_mem[0] = NULL;
+
+    *result = grp;
+    return 0;
+}
+
+int getgrgid_r(gid_t gid, struct group *grp, char *buf, size_t buflen,
+               struct group **result) {
+    return amiga_copy_group(getgrgid(gid), grp, buf, buflen, result);
+}
+
+int getgrnam_r(const char *name, struct group *grp, char *buf, size_t buflen,
+               struct group **result) {
+    return amiga_copy_group(getgrnam(name), grp, buf, buflen, result);
+}
+
+/* AmigaOS has no FIFOs/device nodes to create */
+int mknod(const char *path, mode_t mode, dev_t dev) {
+    (void)path;
+    (void)mode;
+    (void)dev;
+    errno = ENOSYS;
+    return -1;
+}
+PEOF
+if $CC -D_GNU_SOURCE $NIOINC -c "$OUT/libnio/posix_compat.c" -o "$OUT/libnio/posix_compat.o" 2>"$OUT/e"; then
+    echo "  libnio posix compat OK (futimes/getgr*_r/mknod)"
+else
+    echo "  libnio posix compat FAILED"; head -10 "$OUT/e"; exit 1
+fi
+
 # FileDispatcherImpl.seek0: some 8u drops already provide it; only synthesize the
 # compat stub when the native source does not.
 if ! grep -q 'Java_sun_nio_ch_FileDispatcherImpl_seek0' "$NCH/FileDispatcherImpl.c"; then
@@ -728,6 +925,60 @@ Java_java_net_InetAddressImplFactory_isIPv6Supported(JNIEnv *env, jclass cls) {
     (void)env;
     (void)cls;
     return JNI_FALSE;
+}
+
+/* java.net.NetworkInterface -- "this machine has no enumerable interfaces".
+ *
+ * These are NOT optional for a headless-looking app: NetworkInterface.<clinit>
+ * calls init(), so with the natives missing the class initialiser throws
+ * UnsatisfiedLinkError.  That is an Error, not an Exception, so it sails
+ * straight through sun.security.provider.SeedGenerator's catch(Exception) in
+ * addNetworkAdapterInfo() -- which means SecureRandom's seeder cannot
+ * initialise, and everything downstream of it dies.  Files.createTempFile()
+ * draws from SecureRandom, so merely reading an icon through ImageIO was enough
+ * to kill Invoicex with "UnsatisfiedLinkError: init".
+ *
+ * getAll() returns an EMPTY array rather than NULL: getNetworkInterfaces() is
+ * specified to return null when there are none, and callers that skip the null
+ * check would then NPE.  An empty enumeration just yields nothing.  The lookups
+ * return null, which is their documented "not found" answer.  Enumerating real
+ * interfaces would mean a bsdsocket.library implementation -- the rest of
+ * libnet is a stub too, so that is a separate job. */
+JNIEXPORT void JNICALL
+Java_java_net_NetworkInterface_init(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_java_net_NetworkInterface_getAll(JNIEnv *env, jclass cls) {
+    /* cls IS java/net/NetworkInterface -- getAll() is a static native on it */
+    return (*env)->NewObjectArray(env, 0, cls, NULL);
+}
+
+JNIEXPORT jobject JNICALL
+Java_java_net_NetworkInterface_getByName0(JNIEnv *env, jclass cls, jstring name) {
+    (void)env;
+    (void)cls;
+    (void)name;
+    return NULL;
+}
+
+JNIEXPORT jobject JNICALL
+Java_java_net_NetworkInterface_getByIndex0(JNIEnv *env, jclass cls, jint index) {
+    (void)env;
+    (void)cls;
+    (void)index;
+    return NULL;
+}
+
+JNIEXPORT jobject JNICALL
+Java_java_net_NetworkInterface_getByInetAddress0(JNIEnv *env, jclass cls,
+                                                 jobject addr) {
+    (void)env;
+    (void)cls;
+    (void)addr;
+    return NULL;
 }
 NEOF
 $CC -D_GNU_SOURCE $EXP -c "$OUT/libnio/net_stub.c" -o "$OUT/libnio/net_stub.o" 2>/dev/null

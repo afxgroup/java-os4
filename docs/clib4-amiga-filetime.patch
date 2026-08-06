@@ -1,0 +1,120 @@
+diff --git a/library/time/convert_datestamp.c b/library/time/convert_datestamp.c
+index 0c4bbde1..b019491e 100644
+--- a/library/time/convert_datestamp.c
++++ b/library/time/convert_datestamp.c
+@@ -10,24 +10,56 @@
+ #include "locale_headers.h"
+ #endif /* _LOCALE_HEADERS_H */
+ 
+-time_t
+-__convert_datestamp_to_time(const struct DateStamp *ds) {
+-    time_t result;
++/* The UTC offset, in minutes west of Greenwich, used to convert between the
++   local-time DateStamps AmigaOS stores on files and Unix UTC time_t.
++
++   This MUST come from the same place gettimeofday() takes it from, otherwise
++   every file timestamp is skewed against the clock: a file written moments ago
++   reads back minutes -- or hours -- in the future, and anything that compares a
++   file's mtime with the current time draws the wrong conclusion (lock files,
++   java.util.prefs, make-style freshness checks).
++
++   gettimeofday() reads timezone.library (GetTimezoneAttrs/TZA_UTCOffset), which
++   is the authority on AmigaOS 4 and is what Prefs/Time sets.  locale.library's
++   loc_GMTOffset is the legacy setting and is routinely left at 0 on systems
++   whose Timezone prefs are perfectly correct -- which is how the two came to
++   disagree here.  Fall back to it only when timezone.library is unavailable.
++
++   TZA_UTCOffset alone is deliberate: it is the *current* effective offset, and
++   using exactly what gettimeofday() uses is the property that matters. */
++int32
++__get_gmt_offset(void) {
+     struct _clib4 *__clib4 = __CLIB4;
++    int32 gmtoffset = 0;
+ 
+-    ENTER();
++    DECLARE_TIMEZONEBASE_R(__clib4);
++
++    if (ITimezone) {
++        GetTimezoneAttrs(NULL, TZA_UTCOffset, &gmtoffset, TAG_DONE);
++        return gmtoffset;
++    }
+ 
+     __locale_lock(__clib4);
+ 
+-    /* If possible, adjust for the local time zone. We do this because the
+-       AmigaOS system time is returned in local time and we want to return
+-       it in UTC. */
+-    result = UNIX_TIME_OFFSET + ds->ds_Days * (24 * 60 * 60) + ds->ds_Minute * 60 + (ds->ds_Tick / TICKS_PER_SECOND);
+     if (__clib4->__default_locale != NULL)
+-        result += 60 * __clib4->__default_locale->loc_GMTOffset;
++        gmtoffset = __clib4->__default_locale->loc_GMTOffset;
+ 
+     __locale_unlock(__clib4);
+ 
++    return gmtoffset;
++}
++
++time_t
++__convert_datestamp_to_time(const struct DateStamp *ds) {
++    time_t result;
++
++    ENTER();
++
++    /* Adjust for the local time zone: AmigaOS keeps file dates in local time
++       and we return UTC. */
++    result = UNIX_TIME_OFFSET + ds->ds_Days * (24 * 60 * 60) + ds->ds_Minute * 60 + (ds->ds_Tick / TICKS_PER_SECOND);
++    result += 60 * __get_gmt_offset();
++
+     RETURN(result);
+     return (result);
+ }
+diff --git a/library/time/convert_time.c b/library/time/convert_time.c
+index 3567c99b..03e7feb0 100644
+--- a/library/time/convert_time.c
++++ b/library/time/convert_time.c
+@@ -171,18 +171,14 @@ int __secs_to_tm(long long t, struct tm *tm) {
+ BOOL
+ __convert_time_to_datestamp(time_t time_value, struct DateStamp *ds) {
+     BOOL success;
+-    struct _clib4 *__clib4 = __CLIB4;
+ 
+     /* Adjust the time to the AmigaOS epoch. */
+     time_value -= UNIX_TIME_OFFSET;
+ 
+-    __locale_lock(__clib4);
+-
+-    /* If possible, adjust the time to match the local time zone settings. */
+-    if (__clib4->__default_locale != NULL)
+-        time_value -= 60 * __clib4->__default_locale->loc_GMTOffset;
+-
+-    __locale_unlock(__clib4);
++    /* Adjust the time to match the local time zone settings.  Same offset
++       source as __convert_datestamp_to_time(), so writing a file date and
++       reading it back round-trips. */
++    time_value -= 60 * __get_gmt_offset();
+ 
+     ds->ds_Days = (time_value / (24 * 60 * 60));
+     ds->ds_Minute = (time_value % (24 * 60 * 60)) / 60;
+diff --git a/library/time/time_headers.h b/library/time/time_headers.h
+index 97607b83..71614a86 100755
+--- a/library/time/time_headers.h
++++ b/library/time/time_headers.h
+@@ -77,6 +77,10 @@
+ #include "stdlib_utilitybase.h"
+ #endif /* _STDLIB_UTILITYBASE_H */
+ 
++#ifndef _STDLIB_TIMEZONEBASE_H
++#include "stdlib_timezonebase.h"
++#endif /* _STDLIB_TIMEZONEBASE_H */
++
+ /****************************************************************************/
+ 
+ #ifndef _MATH_FP_SUPPORT_H
+@@ -114,6 +118,7 @@ extern const char * const NOCOMMON __month_names[12];
+ extern char * __asctime_r(const struct tm *tm,char * buffer,size_t buffer_size);
+ extern char * __number_to_string(unsigned int number,char * string,size_t max_len,size_t min_len);
+ extern struct tm * __convert_time(struct _clib4 *__clib4, ULONG seconds, LONG gmt_offset, struct tm * tm);
++extern int32 __get_gmt_offset(void);
+ extern time_t __convert_datestamp_to_time(const struct DateStamp * ds);
+ extern BOOL __convert_time_to_datestamp(time_t time_value,struct DateStamp * ds);
+ extern int __calculate_weekday(int year,int month,int day);
