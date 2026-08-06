@@ -52,15 +52,9 @@ for h in classlib.h classlib-defs.h classlib-excep.h classlib-symbol.h; do
     cp -f "classlib/openjdk/$h" "$h"
 done
 
-# AmigaOS runtime: prefer JAVA_HOME when resolving java.home, as dladdr-based
-# nativeJVMPath() can be unreliable on some targets during early startup.
-PROP_C="classlib/openjdk/properties.c"
-if [ -f "$PROP_C" ] && ! grep -q "#include <stdlib.h>" "$PROP_C"; then
-    sed -i 's@#include <string.h>@#include <string.h>\n#include <stdlib.h>@' "$PROP_C"
-fi
-if [ -f "$PROP_C" ] && ! grep -q "amiga JAVA_HOME fallback" "$PROP_C"; then
-    perl -0pi -e 's@char \*classlibDefaultJavaHome\(\) \{\n@char *classlibDefaultJavaHome() {\n#ifdef __amigaos4__\n    const char *java_home = getenv("JAVA_HOME");\n    if(java_home != NULL && *java_home != '\''\\0'\'') {\n        char *home = sysMalloc(strlen(java_home) + 1);\n        strcpy(home, java_home);\n        return home;\n    }\n    /* amiga JAVA_HOME fallback */\n#endif\n@s' "$PROP_C"
-fi
+# AmigaOS java.home resolution (JAVA_HOME env -> PROGDIR: -> libjvm.so path ->
+# JAVA:) now lives in classlib/openjdk/properties.c itself (via the docs patch);
+# no build-time source injection needed here anymore.
 
 INC="-I . -I os/amiga -I os/amiga/powerpc -I interp -I interp/engine -I classlib/openjdk"
 # VERSION_* are JamVM's version (2.0.1), normally from config.h; the openjdk
@@ -100,6 +94,7 @@ done
 
 echo "=== os/amiga (clib4: os.c + arch only) ==="
 compile os/amiga/os.c             os_os
+compile os/amiga/real_amiga_exit.c os_realexit
 compile os/amiga/powerpc/dll_md.c ppc_dll_md
 compile os/amiga/powerpc/init.c   ppc_init
 ppc-amigaos-gcc $CFLAGS -c os/amiga/powerpc/callNative.S -o "$OUT/ppc_callNative.o"

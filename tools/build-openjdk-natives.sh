@@ -103,18 +103,41 @@ static int amiga_oflags(int lf) {
    paths as Unix-absolute (leading '/'), but AmigaDOS uses "Volume:dir/file" with
    NO leading '/'.  We present canonical paths to Java WITH a leading '/' (so
    File.isAbsolute()/toURI() don't double the path), then strip it here before any
-   clib4 stat/open.  Also strips a leading "./" (AmigaDOS has no current-dir prefix).
+   clib4 stat/open.  Also strips a leading "./" (AmigaDOS has no current-dir prefix)
+   and collapses a single ":/" after a volume/assign name: "JAVA:/lib/fonts" ->
+   "JAVA:lib/fonts", because "/" right after ":" is the parent of the volume root.
    "/Volume:..." -> "Volume:...", "./x" -> "x", "RAM:x"/"x" unchanged. */
 static const char *amiga_path(const char *p) {
-    if (p != 0) {
-        if (p[0] == '.' && p[1] == '/') {
-            p += 2;
-        } else if (p[0] == '/') {
-            const char *c = p + 1;
-            while (*c != 0 && *c != '/') { if (*c == ':') { p += 1; break; } c++; }
+    static __thread char buf[4096];
+    const char *src = p;
+    int i = 0;
+
+    if (p == NULL)
+        return NULL;
+
+    if (src[0] == '.' && src[1] == '/')
+        src += 2;
+    else if (src[0] == '/') {
+        const char *c = src + 1;
+        while (*c != 0 && *c != '/') {
+            if (*c == ':') {
+                src++;
+                break;
+            }
+            c++;
         }
     }
-    return p;
+
+    while (*src != 0 && i < (int)sizeof(buf) - 1) {
+        if (src[0] == ':' && src[1] == '/' && src[2] != '/') {
+            buf[i++] = ':';
+            src += 2;
+        } else {
+            buf[i++] = *src++;
+        }
+    }
+    buf[i] = '\0';
+    return buf;
 }
 /* Amiga "canonicalize": no symlinks to resolve in practice; just normalise to the
    AmigaDOS form (amiga_path) and present it back to Java WITH a leading '/' so
@@ -446,11 +469,18 @@ echo "=== niopatch.zip (bootclasspath-prepend NIO.2 platform patch) ==="
 # which kills URLClassLoader/-classpath.  Ship a patched class (always the generic
 # unix/Linux provider) PREPENDED on -Xbootclasspath.  Run with
 # -Dsun.nio.fs.chdirAllowed=true so provider construction needs no libnio natives.
+# java.io.UnixFileSystem is also overridden: stock resolve() joins "JAVA:" +
+# child as "JAVA:/child" (parent of the volume root on AmigaDOS), which breaks
+# File.exists() in ClassLoader.loadLibrary -> UnsatisfiedLinkError for every
+# System.loadLibrary call.  The patched class joins volume-root parents without
+# the '/'.
 NIOP="$PROJECT_ROOT/src/niopatch"
 if [ -f "$NIOP/sun/nio/fs/DefaultFileSystemProvider.java" ]; then
     (cd "$NIOP" \
-    && "$BOOT_JDK/bin/javac" -source 8 -target 8 sun/nio/fs/DefaultFileSystemProvider.java 2>/dev/null \
-    && "$BOOT_JDK/bin/jar" cf "$OUT/niopatch.zip" sun/nio/fs/DefaultFileSystemProvider.class) \
+    && "$BOOT_JDK/bin/javac" -source 8 -target 8 \
+        sun/nio/fs/DefaultFileSystemProvider.java java/io/UnixFileSystem.java 2>/dev/null \
+    && "$BOOT_JDK/bin/jar" cf "$OUT/niopatch.zip" \
+        sun/nio/fs/DefaultFileSystemProvider.class java/io/UnixFileSystem.class) \
     && echo "  niopatch.zip OK ($(wc -c < "$OUT/niopatch.zip") bytes)" \
     || echo "  niopatch.zip FAIL"
 fi

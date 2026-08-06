@@ -56,7 +56,7 @@ cp "$B/libjvm.so"     "$RT/"
     echo ".KET }"
     echo ";\$VER: Java-OS4 $PVER ($DATE) OpenJDK $JVER"
     echo 'SetEnv LD_LIBRARY_PATH "PROGDIR:Sobjs"'
-    echo 'SetEnv JAVA_HOME "PROGDIR:"'
+    echo 'SetEnv JAVA_HOME "JAVA:"'
     echo "JAVA:jamvm-openjdk {args}"
 } > "$RT/java"
 
@@ -107,8 +107,11 @@ cp "$LIBGCC_SO_FILE" "$SOBJ/"
 cp "$CLIB4_LIBRARY_FILE" "$RT/"
 
 # --- runtime: class library + toolkit -------------------------------------
+# Keep bootstrap jars in JAVA: root for Amiga runtime lookup compatibility.
 cp "$JDK8/jre/lib/rt.jar" "$JDK8/jre/lib/charsets.jar" "$JDK8/jre/lib/jce.jar" \
-    "$JDK8/jre/lib/jsse.jar" "$JDK8/jre/lib/resources.jar" "$RT/"
+    "$JDK8/jre/lib/jsse.jar" "$JDK8/jre/lib/resources.jar" \
+    "$RT/"
+[ -f "$JDK8/jre/lib/sunrsasign.jar" ] && cp "$JDK8/jre/lib/sunrsasign.jar" "$RT/" || true
 cp "$N/niopatch.zip"     "$RT/"
 cp "$B/amigatoolkit.zip" "$RT/"
 
