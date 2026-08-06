@@ -151,7 +151,8 @@ mkdir -p "$RT/classes"
 # 0.5.0 shipped nothing to run but `java -version`; bundle a headless demo, a
 # Swing demo, and the self-verifying VM test suite.
 mkdir -p "$RT/examples"
-cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar "$RT/examples/"
+cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar \
+   "$B/examples/"NetTest.jar "$RT/examples/"
 [ -f "$B/examples/"awttest.jar ] && cp "$B/examples/"awttest.jar "$RT/examples/"
 cp "$B/testsuite.zip" "$RT/examples/"
 

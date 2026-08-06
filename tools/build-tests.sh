@@ -3,7 +3,7 @@
 #
 #   build/testsuite.zip    VmSuite (broad VM coverage) + KeyBindTest +
 #                          CloseTest + V9Bomb (class-version-gate fixture)
-#   build/examples/*.jar   HelloJava (headless) + SwingDemo (Swing)
+#   build/examples/*.jar   HelloJava (headless), SwingDemo (Swing), NetTest (java.net)
 #
 # Compiles against the Temurin 8 rt.jar, like the other Java build steps.
 # Run inside the javaos4-build image:
@@ -47,7 +47,7 @@ echo "  V9Bomb.class major byte = $(od -An -tu1 -j7 -N1 "$TC/classes/V9Bomb.clas
 echo "testsuite.zip OK ($(wc -c < "$B/testsuite.zip") bytes)"
 
 echo "=== compiling examples ==="
-for app in HelloJava SwingDemo; do
+for app in HelloJava SwingDemo NetTest; do
     rm -rf "$TC/ex-$app"; mkdir -p "$TC/ex-$app"
     "$JAVAC" -source 8 -target 8 -encoding UTF-8 -bootclasspath "$RT" \
         -d "$TC/ex-$app" "$PROJECT_ROOT/examples/$app.java"
