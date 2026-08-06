@@ -17,8 +17,9 @@
  *     interfaces" stubs the port has always used, plus the ni_addrsID /
  *     ni_indexID globals that NetworkInterface.c would otherwise define.
  *
- *   - One clib4 divergence that upstream cannot see: the accepted socket's
- *     blocking mode.  See NET_Accept().
+ * This file works around nothing: where clib4 diverged from Linux (accept()
+ * handing back a non-blocking socket) the fix belongs in clib4, and
+ * NET_Accept() records the dependency rather than hiding it.
  *
  * IPv6: the natives are built with -DDONT_ENABLE_IPV6, which makes
  * net_util_md.c's IPv6_supported() return JNI_FALSE.  net_util.c's JNI_OnLoad
@@ -34,7 +35,6 @@
  */
 
 #include <errno.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -84,53 +84,33 @@ int NET_SendTo(int s, const void *msg, int len, unsigned int flags,
 }
 
 /*
- * Force fd into genuinely blocking mode, whatever clib4 currently believes.
+ * REQUIRES a clib4 whose accept() does not hand back a non-blocking socket.
  *
- * clib4's fcntl(F_SETFL) only issues file_action_set_blocking when the
- * requested mode differs from its own FDF_NON_BLOCKING bookkeeping, so a
- * single "clear O_NONBLOCK" is silently dropped whenever that bookkeeping has
- * drifted from the socket's real state.  Asking for non-blocking first
- * guarantees the second call is a transition clib4 will act on.
- *
- * Converges on blocking from all four combinations of (real state, believed
- * state): whichever of the two calls clib4 decides to skip, the other one is a
- * difference it must act on, and the last action performed is always
- * set_blocking.
- */
-static void amiga_force_blocking(int fd) {
-    int flags = fcntl(fd, F_GETFL);
-
-    if (flags < 0) {
-        return;
-    }
-    (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-}
-
-/*
  * PlainSocketImpl.c's socketCreate() deliberately puts LISTENING sockets into
- * non-blocking mode (accept is driven by poll through NET_Timeout instead), and
- * on AmigaOS the accepted socket inherits that mode from its listener.  Upstream
- * expects exactly this and calls SET_BLOCKING(newfd) right after NET_Accept
- * returns -- but that macro is fcntl-based, and clib4's accept() registers the
- * new descriptor with FDF_IN_USE|FDF_IS_SOCKET|FDF_READ|FDF_WRITE without ever
- * recording FDF_NON_BLOCKING.  clib4 therefore thinks the accepted socket is
- * already blocking, skips the change, and the socket stays non-blocking for
- * real: the first read on an accepted connection returns EAGAIN and java.net
- * reports "SocketException: Resource temporarily unavailable (Read failed)".
+ * non-blocking mode (accept is driven by poll through NET_Timeout instead) and
+ * relies on accept() returning a blocking connection, calling SET_BLOCKING on
+ * it afterwards purely as a belt-and-braces measure.  That macro is
+ * fcntl-based, so it cannot rescue a clib4 that lets the accepted socket
+ * inherit the listener's mode without recording FDF_NON_BLOCKING: fcntl then
+ * believes the descriptor is already blocking and does nothing, the socket
+ * stays non-blocking for real, and the first read on an accepted connection
+ * fails with "SocketException: Resource temporarily unavailable (Read failed)".
  *
- * Client sockets never hit this, which is why only the server side broke:
- * they are only made non-blocking transiently by connect-with-timeout, where
- * both transitions are ones clib4 sees and performs.
+ * Fixed in clib4 by clearing the flag on the accepted socket (branch
+ * fix/socket-nonblocking-linux-semantics), which is also what Linux does --
+ * accept(2) is explicit that file status flags are not inherited.  Deliberately
+ * NOT worked around here: a workaround would paper over an unfixed clib4 and
+ * this test would stop being able to tell the two apart.
+ *
+ * Client sockets are unaffected either way -- they go non-blocking only
+ * transiently inside connect-with-timeout, where both transitions are ones
+ * clib4 sees and performs.
  */
 int NET_Accept(int s, struct sockaddr *addr, int *addrlen) {
     socklen_t socklen = (socklen_t)*addrlen;
     int ret = AMIGA_NET_RETRY(accept(s, addr, &socklen));
 
     *addrlen = (int)socklen;
-    if (ret >= 0) {
-        amiga_force_blocking(ret);
-    }
     return ret;
 }
 
