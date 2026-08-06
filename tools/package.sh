@@ -158,7 +158,7 @@ mkdir -p "$RT/classes"
 # Swing demo, and the self-verifying VM test suite.
 mkdir -p "$RT/examples"
 cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar \
-   "$B/examples/"NetTest.jar "$RT/examples/"
+   "$B/examples/"NetTest.jar "$B/examples/"NetDownload.jar "$RT/examples/"
 [ -f "$B/examples/"awttest.jar ] && cp "$B/examples/"awttest.jar "$RT/examples/"
 cp "$B/testsuite.zip" "$RT/examples/"
 
