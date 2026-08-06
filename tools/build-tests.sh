@@ -12,7 +12,10 @@
 set -e
 . "$(dirname "$0")/build-env.sh"
 JDK8=$BOOT_JDK
-RT="$JDK8/jre/lib/rt.jar"
+# The runtime's boot classpath, not just rt.jar: javax.crypto lives in jce.jar
+# and javax.net.ssl in jsse.jar, and the examples exercise both.  Mirrors what
+# classlibDefaultBootClassPath() gives the VM on the Amiga side.
+RT="$JDK8/jre/lib/rt.jar:$JDK8/jre/lib/jce.jar:$JDK8/jre/lib/jsse.jar"
 JAVAC="$JDK8/bin/javac"
 JAR="$JDK8/bin/jar"
 B=$BUILD_ROOT

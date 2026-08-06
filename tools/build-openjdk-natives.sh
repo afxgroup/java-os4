@@ -970,4 +970,91 @@ echo "  undefined check:"; ppc-amigaos-nm -D -u "$OUT/libnet.so" 2>/dev/null \
 ppc-amigaos-nm -D --defined-only "$OUT/libjava.so" 2>/dev/null | grep -qw getErrorString \
     || echo "    UNRESOLVED getErrorString (not exported by libjava.so either)"
 
+echo "=== libsunec.so (SunEC: elliptic curve crypto) ==="
+# Without this the SunEC provider cannot register (its class initialiser does
+# System.loadLibrary("sunec")), so java.security's security.provider.3 is
+# skipped and the runtime has no EC at all.  Every modern TLS server then
+# rejects us: TLS 1.3 negotiates over the EC named groups, and TLS 1.2 servers
+# are typically ECDHE-only, so the ClientHello carries nothing they accept and
+# the handshake dies with "Received fatal alert: handshake_failure".  Verified
+# by removing SunEC from a host JDK 8 and reproducing the identical failure.
+#
+# The NSS-derived sources build against clib4 unchanged; only their platform
+# conditionals need to learn about us.  Each guarded on its own marker: the
+# sys/systm.h edit is not idempotent (its pattern is a prefix of its own
+# replacement), so re-running unguarded would keep appending.
+EC=$J/src/share/native/sun/security/ec
+if [ -d "$EC" ]; then
+    # ecc_impl.h has per-platform blocks for __linux__/_ALLBSD_SOURCE/AIX/_WIN32
+    # and nothing else; join the BSD one for ulong_t/boolean_t/B_FALSE (it is
+    # the variant that does NOT redefine uint8_t, which clib4 already has).
+    if ! grep -q "__amigaos4__" "$EC/impl/ecc_impl.h"; then
+        sed -i 's@#ifdef _ALLBSD_SOURCE@#if defined(_ALLBSD_SOURCE) || defined(__amigaos4__)@' \
+            "$EC/impl/ecc_impl.h"
+        echo "  adapted ecc_impl.h (amigaos joins the BSD typedefs)"
+    fi
+    # <sys/systm.h> is a Solaris kernel header; the guard excludes linux and bsd.
+    for f in ecdecode.c oid.c secitem.c; do
+        [ -f "$EC/impl/$f" ] || continue
+        if ! grep -q "__amigaos4__" "$EC/impl/$f"; then
+            sed -i 's@#if !defined(__linux__) \&\& !defined(_ALLBSD_SOURCE)@#if !defined(__linux__) \&\& !defined(_ALLBSD_SOURCE) \&\& !defined(__amigaos4__)@' \
+                "$EC/impl/$f"
+        fi
+    done
+
+    for c in sun.security.ec.ECKeyPairGenerator sun.security.ec.ECDSASignature \
+             sun.security.ec.ECDHKeyAgreement; do
+        "$BOOT_JDK/bin/javah" -d "$HDR" \
+            -classpath "$RTJAR:$BOOT_JDK/jre/lib/ext/sunec.jar" "$c" >/dev/null 2>&1 || true
+    done
+
+    # -DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B are what the OpenJDK
+    # makefile passes (jdk/make/lib/SecurityLibraries.gmk).  No jdkdefs.h
+    # force-include here: SunEC touches no files, so it needs no amiga_path.
+    ECINC="-I $HDR $EXP -I $J/src/share/native/common -I $EC -I $EC/impl"
+    ECDEFS="-DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B"
+    mkdir -p "$OUT/libsunec"
+    ecok=0; ecfail=0
+    for f in "$EC"/impl/*.c; do
+        if $CC $ECDEFS $ECINC -c "$f" -o "$OUT/libsunec/$(basename "${f%.c}").o" 2>"$OUT/e"; then
+            ecok=$((ecok+1))
+        else
+            ecfail=$((ecfail+1)); echo "  EC FAIL $(basename "$f")"
+            grep -m2 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
+        fi
+    done
+    # ECC_JNI is the one C++ file in the whole runtime; LANG := C++ upstream too.
+    # It needs exactly two things from the C++ runtime -- operator new[] and
+    # operator delete[] -- which src/openjdk/amiga_cxx_alloc.cpp supplies, so we
+    # link no libstdc++ at all.  See that file for why not.
+    for cpp in "$EC/ECC_JNI.cpp" "$PROJECT_ROOT/src/openjdk/amiga_cxx_alloc.cpp"; do
+        if ppc-amigaos-g++ -mcrt=clib4 -fPIC -O2 -w -fno-exceptions -fno-rtti \
+               $ECDEFS $ECINC -c "$cpp" \
+               -o "$OUT/libsunec/$(basename "${cpp%.cpp}").o" 2>"$OUT/e"; then
+            ecok=$((ecok+1))
+        else
+            ecfail=$((ecfail+1)); echo "  EC FAIL $(basename "$cpp")"
+            grep -m4 "error:" "$OUT/e" | sed 's/^/        /'
+        fi
+    done
+    echo "  libsunec compile: $ecok OK, $ecfail FAILED"
+
+    # ECC_JNI.cpp uses new[]/delete[], so the link pulls operator new[]
+    # (_Znaj) and operator delete[] (_ZdaPv) from libstdc++.  Upstream just adds
+    # -lstdc++; here that would mean shipping another sobj for two symbols, so
+    # link them in statically instead and keep Sobjs/ as it is.
+    if ppc-amigaos-g++ -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
+           -o "$OUT/libsunec.so" "$OUT"/libsunec/*.o 2>"$OUT/e"; then
+        echo "  libsunec.so OK ($(wc -c < "$OUT/libsunec.so") bytes)"
+    else
+        echo "  libsunec.so LINK FAIL"; head -10 "$OUT/e"
+    fi
+    ecn=$(ppc-amigaos-nm -D --defined-only "$OUT/libsunec.so" 2>/dev/null \
+          | grep -c "Java_sun_security_ec")
+    [ "$ecn" = 5 ] && echo "    5 SunEC natives OK" \
+                   || echo "    expected 5 SunEC natives, found $ecn -- EC will not work"
+else
+    echo "  SKIP: $EC not present"
+fi
+
 echo "=== built ==="; ls -l "$OUT"/*.a "$OUT"/*.so "$OUT"/niopatch.zip 2>/dev/null

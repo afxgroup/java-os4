@@ -62,7 +62,7 @@ cp "$B/libjvm.so"     "$RT/"
 } > "$RT/java"
 
 # --- runtime: OpenJDK + AWT natives ---------------------------------------
-for so in libjava libverify libzip libnio libnet \
+for so in libjava libverify libzip libnio libnet libsunec \
           libawt libfontmanager libamigaawt liblcms; do
     cp "$N/$so.so" "$RT/"
 done
@@ -125,15 +125,21 @@ cp "$B/amigatoolkit.zip" "$RT/"
 # classlibDefaultExtDirs() already resolves java.ext.dirs to <java.home>/lib/ext
 # (see the JamVM patch), so dropping the jars in is enough.
 #
-# Deliberately NOT shipped: sunec.jar and sunpkcs11.jar need native libraries
-# (libsunec.so / libj2pkcs11.so) we do not build, so shipping them would trade a
-# missing provider for a failing one; nashorn.jar (1.9M) and cldrdata.jar (3.7M)
+# sunec.jar carries the SunEC provider, whose class initialiser does
+# System.loadLibrary("sunec") -- so it is only shippable now that we build
+# libsunec.so.  It is not optional: without EC the runtime offers no curve a
+# modern TLS server will take, and every https:// call dies with
+# "handshake_failure".
+#
+# Deliberately NOT shipped: sunpkcs11.jar needs libj2pkcs11.so (and PKCS11
+# hardware) we do not build, so shipping it would trade a missing provider for
+# a failing one; nashorn.jar (1.9M) and cldrdata.jar (3.7M)
 # are big and unused by default on 8 (java.locale.providers is JRE,SPI, which
 # reads localedata.jar); jaccess.jar is the Windows accessibility bridge.
 # meta-index is skipped on purpose too -- it is a load-time optimisation that
 # describes a lib/ext we do not reproduce.
 mkdir -p "$RT/lib/ext"
-for j in sunjce_provider.jar localedata.jar zipfs.jar dnsns.jar; do
+for j in sunjce_provider.jar sunec.jar localedata.jar zipfs.jar dnsns.jar; do
     cp "$JDK8/jre/lib/ext/$j" "$RT/lib/ext/" 2>/dev/null || \
         echo "  WARN: missing $JDK8/jre/lib/ext/$j"
 done

@@ -34,7 +34,11 @@ import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.charset.Charset;
+import java.security.Security;
 import java.util.Enumeration;
+import javax.crypto.Cipher;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLHandshakeException;
 
 public class NetTest {
 
@@ -59,6 +63,8 @@ public class NetTest {
         dns(host);
         tcpConnect(host, port);
         httpGet(host);
+        cryptoProviders();
+        httpsGet(host);
 
         System.out.println();
         System.out.println("passed " + passed + ", failed " + failed
@@ -247,6 +253,55 @@ public class NetTest {
                 } catch (IOException ignored) {
                 }
             }
+        }
+    }
+
+    /*
+     * Both providers live in lib/ext and both were missing at one point.  They
+     * fail silently -- an absent provider is simply not registered -- so check
+     * them by name rather than waiting for the symptom.
+     *
+     * SunJCE holds every cipher (jce.jar is only the javax.crypto API); without
+     * it Cipher.getInstance("DES") throws NoSuchAlgorithmException.  SunEC
+     * needs libsunec.so to load at all, and without EC the ClientHello carries
+     * no curve a modern server accepts -- see httpsGet below.
+     */
+    private static void cryptoProviders() {
+        check("SunJCE provider (ciphers)",
+              Security.getProvider("SunJCE") != null, "lib/ext/sunjce_provider.jar");
+        check("SunEC provider (elliptic curve)",
+              Security.getProvider("SunEC") != null, "lib/ext/sunec.jar + libsunec.so");
+        try {
+            Cipher.getInstance("DES");
+            pass("Cipher.getInstance(DES)", null);
+        } catch (Throwable t) {
+            fail("Cipher.getInstance(DES)", t);
+        }
+    }
+
+    /*
+     * The end-to-end check: TLS over the sockets above, with the crypto
+     * providers above.  A handshake_failure here almost always means no EC --
+     * TLS 1.3 negotiates over the named curves and most TLS 1.2 servers are
+     * ECDHE-only, so a runtime without SunEC offers nothing they will take.
+     */
+    private static void httpsGet(String host) {
+        try {
+            URL url = new URL("https://" + host + "/");
+            HttpsURLConnection c = (HttpsURLConnection) url.openConnection();
+            c.setConnectTimeout(20000);
+            c.setReadTimeout(20000);
+            c.connect();
+            String suite = c.getCipherSuite();
+            int code = c.getResponseCode();
+            c.disconnect();
+            pass("HTTPS GET https://" + host + "/", "HTTP " + code + ", " + suite);
+        } catch (SSLHandshakeException e) {
+            fail("HTTPS GET https://" + host + "/", e);
+        } catch (IOException e) {
+            skip("HTTPS GET https://" + host + "/", e.toString());
+        } catch (Throwable t) {
+            fail("HTTPS GET https://" + host + "/", t);
         }
     }
 
