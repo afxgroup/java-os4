@@ -30,7 +30,20 @@ import java.net.URLConnection;
 
 public class NetDownload {
 
-    private static final int BUFFER = 32 * 1024;
+    /*
+     * 64K because that is the largest read the native layer will actually
+     * perform for us: SocketInputStream.socketRead0 clamps len to
+     * MAX_HEAP_BUFFER_LEN, which on a 32-bit JDK -- ours -- is 65536 (the
+     * 131072 next to it in net_util_md.h is the _LP64 branch).  Asking for more
+     * just wastes an array and still reads 64K at a time.
+     *
+     * Below 8192 the native side would use its stack buffer instead of a
+     * malloc, which sounds better and is not: dropping to 8K quadruples the
+     * recv() count, and measurement says the syscalls dominate by a wide margin
+     * (40MB over loopback: 1285 recv at 32K vs 5286 at 8K, ~4x the wall time).
+     * One allocation per 64K is the cheaper end of that trade.
+     */
+    private static final int BUFFER = 64 * 1024;
     private static final int MAX_REDIRECTS = 5;
     /* Redraw at most this often: the progress line goes to a console that may
      * be a serial port, where writing on every 32K chunk would itself cost
@@ -133,7 +146,20 @@ public class NetDownload {
         for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
             URLConnection c = new URL(url).openConnection();
             c.setConnectTimeout(20000);
-            c.setReadTimeout(30000);
+            /*
+             * No read timeout, deliberately.  A non-zero SO_TIMEOUT sends every
+             * single read down SocketInputStream's NET_ReadWithTimeout path --
+             * poll() followed by recv(MSG_DONTWAIT) -- instead of one plain
+             * blocking recv(), doubling the socket calls for the whole
+             * transfer.  Over loopback that alone was a fifth of the
+             * throughput, and bsdsocket calls are not cheaper here.
+             *
+             * What we give up is the automatic abort on a dead connection.  For
+             * this tool that is a fair trade: the progress line redraws twice a
+             * second, so a stall is visible the moment it happens and Ctrl-C is
+             * right there.  The connect timeout stays -- without it an
+             * unreachable host hangs before printing anything at all.
+             */
 
             if (!(c instanceof HttpURLConnection)) {
                 c.connect();
