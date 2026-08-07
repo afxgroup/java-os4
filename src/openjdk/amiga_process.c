@@ -99,6 +99,31 @@ static void closeSafe(int fd) {
     }
 }
 
+/*
+ * Keep this descriptor out of the child.
+ *
+ * clib4's build_fd_inherit_spec() walks every descriptor from 3 up and hands
+ * the child a duplicate of each one that is not marked close-on-exec.  On Linux
+ * the same inheritance exists, but fork() gives OpenJDK a window in which the
+ * child closes everything it does not need before exec.  spawnvpe has no such
+ * window -- it creates and execs in one call -- so the flag is the only place
+ * left to say "not this one".
+ *
+ * Without it the child inherits copies of the parent's three pipe ends.  They
+ * keep the pipes alive after both sides have closed, which is three PIPE:
+ * handles per exec that never go away, and they also hold the write ends open,
+ * so the parent's reader never sees EOF.
+ */
+static void dontInherit(int fd) {
+    if (fd >= 0) {
+        int flags = fcntl(fd, F_GETFD, 0);
+
+        if (flags >= 0) {
+            fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+        }
+    }
+}
+
 /* ---- diagnostics ----------------------------------------------------- */
 
 /*
@@ -211,6 +236,7 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
             goto CatchIO;
         }
         childIn = in[0];                        /* child reads its stdin */
+        dontInherit(in[1]);                    /* ours; not the child's */
     } else {
         childIn = fds[0];
     }
@@ -220,6 +246,7 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
             goto CatchIO;
         }
         childOut = out[1];                      /* child writes its stdout */
+        dontInherit(out[0]);                    /* ours; not the child's */
     } else {
         childOut = fds[1];
     }
@@ -231,6 +258,7 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
             goto CatchIO;
         }
         childErr = err[1];
+        dontInherit(err[0]);                    /* ours; not the child's */
     } else {
         childErr = fds[2];
     }
