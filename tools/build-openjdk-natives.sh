@@ -1054,7 +1054,17 @@ if [ -d "$EC" ]; then
     # (_Znaj) and operator delete[] (_ZdaPv) from libstdc++.  Upstream just adds
     # -lstdc++; here that would mean shipping another sobj for two symbols, so
     # link them in statically instead and keep Sobjs/ as it is.
-    if ppc-amigaos-g++ -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
+    #
+    # -static-libstdc++ is what actually delivers that.  Without it g++ links
+    # libstdc++.so dynamically, and since Sobjs/ ships only libc/libpthread/
+    # libm/librt/libz/libgcc, loading libsunec.so then depended on a libstdc++.so
+    # from wherever the machine happened to have one -- and on the AmigaOS ELF
+    # loader failing with "Unresolved symbol: __gthread_mutex_destroy in
+    # libstdc++.so".  Linked statically the gthread references are not merely
+    # satisfied, they are absent: nothing pulls that threading layer in, and
+    # libsunec.so needs only libm, libgcc and libc, all of which we ship.
+    if ppc-amigaos-g++ -mcrt=clib4 -fPIC -shared -static-libstdc++ \
+           -Wl,-rpath=JAVA:Sobjs \
            -o "$OUT/libsunec.so" "$OUT"/libsunec/*.o 2>"$OUT/e"; then
         echo "  libsunec.so OK ($(wc -c < "$OUT/libsunec.so") bytes)"
     else

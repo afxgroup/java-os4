@@ -2680,7 +2680,7 @@ index b453d7b..9793439 100644
      setOSProperties(properties);
      setUserDirProperty(properties);
 diff --git a/src/thread.c b/src/thread.c
-index e4fb7d1..9aa64db 100644
+index e4fb7d1..341ce18 100644
 --- a/src/thread.c
 +++ b/src/thread.c
 @@ -110,6 +110,12 @@ static int threads_waiting_to_start = 0;
@@ -2713,7 +2713,42 @@ index e4fb7d1..9aa64db 100644
  int getPeakThreadsCount() {
      return peak_threads_count;
  }
-@@ -787,10 +803,18 @@ void detachJNIThread(Thread *thread) {
+@@ -613,8 +629,33 @@ void *detachThread(Thread *thread) {
+     Object *group = INST_DATA(java_thread, Object*, group_offset);
+ 
+     /* If there's an exception pending, it is uncaught */
+-    if(exceptionOccurred0(ee))
++    if(exceptionOccurred0(ee)) {
++#ifdef __amigaos4__
++        /* ...unless we are the ones who caused it.  Shutting the VM down here
++           means interrupting every thread out of Object.wait/sleep so it can
++           self-terminate (see exitWakeAllThreads: clib4's exit() waits for all
++           pthread children, so a thread left alive wedges the process).  A
++           thread woken that way sees an InterruptedException and gets to run its
++           catch block first, and code that treats an interrupt as impossible
++           turns it into something alarming --
++
++             Exception in thread "SeedGenerator Thread" java.lang.InternalError:
++               internal error: SeedGenerator thread generated an exception.
++               Caused by: java.lang.InterruptedException
++
++           printed AFTER a run that succeeded.  A stock JVM never shows this:
++           daemon threads are simply abandoned, never resumed to unwind.  Stay
++           quiet once vm_exiting is set -- the VM is going away and this is our
++           own interrupt coming back to us.  Exceptions during normal running
++           are unaffected. */
++        extern volatile int vm_exiting;
++
++        if(vm_exiting)
++            clearException();
++        else
++#endif
+         uncaughtException();
++    }
+ 
+     /* Don't do anything if this is the main thread */
+     if(thread->prev == NULL)
+@@ -787,10 +828,18 @@ void detachJNIThread(Thread *thread) {
      detachThread(thread);
  }
  
@@ -2732,7 +2767,7 @@ index e4fb7d1..9aa64db 100644
      if(main_exited)
          return NULL;
  
-@@ -798,9 +822,32 @@ static void *shell(void *args) {
+@@ -798,9 +847,32 @@ static void *shell(void *args) {
         exist.  As the root group is main, we add it to that for now... */
      attachThread(((char**)args)[0], TRUE, &self, self,
                   INST_DATA(main_ee.thread, Object*, group_offset));
@@ -2765,7 +2800,7 @@ index e4fb7d1..9aa64db 100644
      return NULL;
  }
  
-@@ -814,7 +861,14 @@ void createVMThread(char *name, void (*start)(Thread*)) {
+@@ -814,7 +886,14 @@ void createVMThread(char *name, void (*start)(Thread*)) {
      args[2] = thread;
  
      memset(thread, 0, sizeof(Thread));
@@ -2781,7 +2816,7 @@ index e4fb7d1..9aa64db 100644
  
      /* Wait for thread to start */
  
-@@ -822,6 +876,7 @@ void createVMThread(char *name, void (*start)(Thread*)) {
+@@ -822,6 +901,7 @@ void createVMThread(char *name, void (*start)(Thread*)) {
      while(classlibGetThreadState(thread) == CREATING)
          pthread_cond_wait(&cv, &lock);
      pthread_mutex_unlock(&lock);
@@ -2789,7 +2824,7 @@ index e4fb7d1..9aa64db 100644
  }
  
  Object *runningThreadStackTrace(Thread *thread, int max_depth,
-@@ -868,6 +923,9 @@ Object *runningThreadStackTrace(Thread *thread, int max_depth,
+@@ -868,6 +948,9 @@ Object *runningThreadStackTrace(Thread *thread, int max_depth,
  }
  
  void suspendThread(Thread *thread) {
@@ -2799,7 +2834,7 @@ index e4fb7d1..9aa64db 100644
      thread->suspend = TRUE;
      MBARRIER();
  
-@@ -900,6 +958,9 @@ void resumeThread(Thread *thread) {
+@@ -900,6 +983,9 @@ void resumeThread(Thread *thread) {
                thread->id);
          sched_yield();
      }
@@ -2809,7 +2844,7 @@ index e4fb7d1..9aa64db 100644
  }
  
  void suspendAllThreads(Thread *self) {
-@@ -907,6 +968,9 @@ void suspendAllThreads(Thread *self) {
+@@ -907,6 +993,9 @@ void suspendAllThreads(Thread *self) {
  
      TRACE("Thread %p id: %d is suspending all threads\n", self, self->id);
      pthread_mutex_lock(&lock);
@@ -2819,7 +2854,7 @@ index e4fb7d1..9aa64db 100644
  
      for(thread = &main_thread; thread != NULL; thread = thread->next) {
          if(thread == self)
-@@ -982,6 +1046,9 @@ void resumeAllThreads(Thread *self) {
+@@ -982,6 +1071,9 @@ void resumeAllThreads(Thread *self) {
      }
  
      all_threads_suspended = FALSE;
@@ -2829,7 +2864,7 @@ index e4fb7d1..9aa64db 100644
      if(threads_waiting_to_start) {
          TRACE("%d threads waiting to start...\n", threads_waiting_to_start);
          pthread_cond_broadcast(&cv);
-@@ -991,6 +1058,112 @@ void resumeAllThreads(Thread *self) {
+@@ -991,6 +1083,112 @@ void resumeAllThreads(Thread *self) {
      pthread_mutex_unlock(&lock);
  }
  
@@ -2942,7 +2977,7 @@ index e4fb7d1..9aa64db 100644
  static void suspendLoop(Thread *thread) {
      char old_state = thread->suspend_state;
      sigjmp_buf env;
-@@ -1012,6 +1185,7 @@ static void suspendLoop(Thread *thread) {
+@@ -1012,6 +1210,7 @@ static void suspendLoop(Thread *thread) {
      thread->suspend_state = old_state;
      MBARRIER();
  }
@@ -2950,7 +2985,7 @@ index e4fb7d1..9aa64db 100644
  
  static void suspendHandler(int sig) {
      Thread *thread = threadSelf();
-@@ -1138,8 +1312,21 @@ static void initialiseSignalMask() {
+@@ -1138,8 +1337,21 @@ static void initialiseSignalMask() {
      sigset_t mask;
  
      sigemptyset(&mask);
@@ -2972,7 +3007,7 @@ index e4fb7d1..9aa64db 100644
      sigaddset(&mask, SIGPIPE);
      sigprocmask(SIG_BLOCK, &mask, NULL);
  }
-@@ -1234,6 +1421,21 @@ Object *runningThreadObjects() {
+@@ -1234,6 +1446,21 @@ Object *runningThreadObjects() {
  
  void exitVM(int status) {
      main_exited = TRUE;
@@ -2994,7 +3029,7 @@ index e4fb7d1..9aa64db 100644
  
      /* Execute System.exit() to run any registered shutdown hooks.
         In the unlikely event that System.exit() can't be found, or
-@@ -1248,22 +1450,37 @@ void exitVM(int status) {
+@@ -1248,22 +1475,37 @@ void exitVM(int status) {
          }
      }
  
@@ -3032,7 +3067,7 @@ index e4fb7d1..9aa64db 100644
  }
  
  void mainThreadSetContextClassLoader(Object *loader) {
-@@ -1324,6 +1541,13 @@ int initialiseThreadStage1(InitArgs *args) {
+@@ -1324,6 +1566,13 @@ int initialiseThreadStage1(InitArgs *args) {
      return TRUE;
  }
  
@@ -3046,7 +3081,7 @@ index e4fb7d1..9aa64db 100644
  int initialiseThreadStage2(InitArgs *args) {
      Class *thrdGrp_class;
      Object *main_group, *java_thread;
-@@ -1332,9 +1556,11 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1332,9 +1581,11 @@ int initialiseThreadStage2(InitArgs *args) {
      MethodBlock *run, *remove_thread;
  
      /* Load thread class and register reference for compaction threading */
@@ -3058,7 +3093,7 @@ index e4fb7d1..9aa64db 100644
      registerStaticClassRef(&thread_class);
  
      name = findField(thread_class, SYMBOL(name), classlibThreadNameType());
-@@ -1378,11 +1604,13 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1378,11 +1629,13 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Classlib specific initialisation prior to main thread being
         setup */
@@ -3072,7 +3107,7 @@ index e4fb7d1..9aa64db 100644
      java_thread = initJavaThread(&main_thread, FALSE, "main", main_group);
      if(java_thread == NULL)
          goto error;
-@@ -1391,19 +1619,33 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1391,19 +1644,33 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Setup signal handling.  This will be inherited by all
         threads created within Java */
