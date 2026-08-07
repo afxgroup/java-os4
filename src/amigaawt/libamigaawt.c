@@ -118,25 +118,25 @@ static void register_window(struct Window *win)
         g_atexit_registered = 1;
         atexit(awt_atexit_cleanup);
     }
-    IExec->ObtainMutex(windowMutex);
+    IExec->MutexObtain(windowMutex);
     for (i = 0; i < MAX_AWT_WINDOWS; i++)
         if (g_windows[i] == NULL) {
             g_windows[i] = win;
             break;
         }
-    IExec->ReleaseMutex(windowMutex);
+    IExec->MutexRelease(windowMutex);
 }
 
 static void unregister_window(struct Window *win)
 {
     int i;
-    IExec->ObtainMutex(windowMutex);
+    IExec->MutexObtain(windowMutex);
     for (i = 0; i < MAX_AWT_WINDOWS; i++)
         if (g_windows[i] == win) {
             g_windows[i] = NULL;
             break;
         }
-    IExec->ReleaseMutex(windowMutex);
+    IExec->MutexRelease(windowMutex);
 }
 
 static jlong do_open(JNIEnv *env, jint w, jint h, jstring title, int sizable)
