@@ -1143,7 +1143,7 @@ index bf88d59..c663143 100644
          MethodBlock *mb = lookupMethod(excep->class, SYMBOL(printStackTrace),
                                                       SYMBOL(___V));
 diff --git a/src/init.c b/src/init.c
-index 32539cf..2f3247c 100644
+index 32539cf..8798072 100644
 --- a/src/init.c
 +++ b/src/init.c
 @@ -26,7 +26,8 @@
@@ -1156,7 +1156,7 @@ index 32539cf..2f3247c 100644
  extern void initialisePlatform();
  
  unsigned long clampHeapLimit(long long limit) {
-@@ -34,6 +35,161 @@ unsigned long clampHeapLimit(long long limit) {
+@@ -34,6 +35,183 @@ unsigned long clampHeapLimit(long long limit) {
      return (unsigned long)MIN(clamp, MAX_MAX_HEAP);
  }
  
@@ -1188,6 +1188,7 @@ index 32539cf..2f3247c 100644
 +extern void exitWakeAllThreads(void);
 +extern void exitDumpRemainingThreads(void);
 +extern void classlibSignalThreadExit(void);
++extern void exitDetachAndDieSelf(void);
 +extern int getThreadsCount(void);
 +extern void realAmigaExit(int error);
 +
@@ -1201,39 +1202,44 @@ index 32539cf..2f3247c 100644
 +static volatile int amiga_main_exit_requested = FALSE;
 +static volatile int amiga_main_exit_status = 0;
 +
++static void amiga_exit(int status);
++
 +/*
 + * Called from threadPollSuspend(), i.e. at a bytecode dispatch point, so the
 + * main thread is at a safe point rather than somewhere arbitrary.
 + *
 + * Only the main task may take an AmigaOS 4 process down, so a non-main thread
 + * that reaches exitVM (Ctrl-C arrives on the Signal Handler thread, runs the
-+ * shutdown hooks, then calls Shutdown.halt) can only ask.  Until this existed
-+ * the request went nowhere: amiga_exit() logged "delegating final exit to main
-+ * thread" and pthread_exit()ed, terminateVMThreads()'s requestExitVMWaitBreak()
-+ * found nothing to wake because main was still inside the application's main()
-+ * rather than parked in mainThreadWaitToExitVM(), and the program simply
-+ * carried on running with its VM half torn down.
++ * shutdown hooks, then calls Shutdown.halt) can only ask.  This is where the
++ * main thread answers.
 + *
-+ * There is no unwinding back to main() from here -- we are many Java frames
-+ * deep -- so this is realAmigaExit(), which reaps the child tasks and _Exit()s.
-+ * Legitimate here precisely because it IS the main task.
++ * It runs the ORDINARY main-thread shutdown -- amiga_exit(), which waits for
++ * every other thread to leave and then closes the AWT windows -- and only then
++ * exits.  It must not shortcut to realAmigaExit(): that one Signal()s each
++ * surviving child with SIGKILL and then loops on Wait(SIGBREAKF_CTRL_F) until
++ * they are gone, and a clib4 pthread does not die from a raw Exec signal.  Used
++ * here it did not take the process down, it parked the main thread in that loop
++ * forever -- Ctrl-C stopped the transfer and never returned to the prompt.
++ *
++ * exit() rather than a return: we are many Java frames below main(), so there
++ * is nothing to unwind to.  Legal because this IS the main task and, by the
++ * time amiga_exit() has returned, it is the only one left.
 + */
 +void amigaMainThreadExitIfRequested(void) {
 +    if(!amiga_main_exit_requested)
 +        return;
 +
-+    /* Once: realAmigaExit does not return, but do not race a second poll. */
++    /* Once: a second poll must not re-enter the shutdown. */
 +    amiga_main_exit_requested = FALSE;
 +
 +    DebugPrintF("[EXIT] main thread taking the process down (status=%d)\n",
 +                amiga_main_exit_status);
 +
-+    if(amiga_awt_cleanup_fn != NULL) {
-+        DebugPrintF("[EXIT] main thread: closing AWT windows\n");
-+        amiga_awt_cleanup_fn();
-+    }
++    /* Takes the main_exit path: drains every other thread, then AWT cleanup. */
++    amiga_exit(amiga_main_exit_status);
 +
-+    realAmigaExit(amiga_main_exit_status);
++    DebugPrintF("[EXIT] main thread: exit(%d)\n", amiga_main_exit_status);
++    exit(amiga_main_exit_status);
 +}
 +
 +static void amiga_exit(int status) {
@@ -1251,6 +1257,22 @@ index 32539cf..2f3247c 100644
 +        amiga_main_exit_status = status;
 +        amiga_main_exit_requested = TRUE;
 +        MBARRIER();
++
++        /* Hand over and get out of the way.  Draining here would be the wrong
++           thread doing it -- main is the one that must see the count reach 1
++           before it exits -- and this thread is itself part of what main is
++           waiting for.  So: tell everyone to go, then leave properly.
++           exitDetachAndDieSelf() unlinks us and drops threads_count before
++           pthread_exit(); a bare pthread_exit() leaves the entry linked and
++           counted, and main would then wait for a thread that no longer runs. */
++        terminateVMThreads();
++        classlibSignalThreadExit();
++        exitWakeAllThreads();
++
++        DebugPrintF("[EXIT] amiga_exit: non-main thread leaving; main will "
++                    "drain and exit (threads=%d)\n", getThreadsCount());
++        exitDetachAndDieSelf();
++        return;                 /* not reached */
 +    }
 +
 +    terminateVMThreads();
@@ -1318,7 +1340,7 @@ index 32539cf..2f3247c 100644
  /* Setup default values for command line args */
  
  void setDefaultInitArgs(InitArgs *args) {
-@@ -65,9 +221,17 @@ void setDefaultInitArgs(InitArgs *args) {
+@@ -65,9 +243,17 @@ void setDefaultInitArgs(InitArgs *args) {
  
      args->props_count = 0;
  
@@ -1336,7 +1358,7 @@ index 32539cf..2f3247c 100644
  
  #ifdef INLINING
      args->replication_threshold = 10;
-@@ -89,34 +253,46 @@ int VMInitialising() {
+@@ -89,34 +275,46 @@ int VMInitialising() {
      return VM_initing;
  }
  
@@ -1403,6 +1425,38 @@ index 32539cf..2f3247c 100644
      VM_initing = FALSE;
      return status;
  }
+diff --git a/src/interp/engine/interp-direct.h b/src/interp/engine/interp-direct.h
+index 7df2e62..8d90223 100644
+--- a/src/interp/engine/interp-direct.h
++++ b/src/interp/engine/interp-direct.h
+@@ -236,9 +236,19 @@ opc##x##_##y##_##z:
+ 
+ #endif /* USE_CACHE */
+ 
++/*
++ * DISPATCH_FIRST -- and only DISPATCH_FIRST -- carries the AmigaOS safepoint
++ * (see interp.h).  It is reached at method entry (INTERPRETER_PROLOGUE), on
++ * every taken branch, on return (DISPATCH_RET) and out of a switch, which is
++ * the classic safepoint set: no loop and no call can run unbounded without
++ * crossing one.  Deliberately NOT in DISPATCH, the straight-line path -- that
++ * is the hot one, and polling per taken branch already bounds the wait far
++ * more cheaply than interp-indirect.h did by polling every single opcode.
++ */
+ #ifdef PREFETCH
+ #define DISPATCH_FIRST                          \
+ {                                               \
++    AMIGA_SAFEPOINT                             \
+     next_handler = pc[1].handler;               \
+     REDISPATCH                                  \
+ }
+@@ -251,6 +261,7 @@ opc##x##_##y##_##z:
+ }
+ #else
+ #define DISPATCH_FIRST                          \
++    AMIGA_SAFEPOINT                             \
+     REDISPATCH
+ 
+ #define DISPATCH(level, ins_len)                \
 diff --git a/src/interp/engine/interp-indirect.h b/src/interp/engine/interp-indirect.h
 index 6a9f7c0..6380ae7 100644
 --- a/src/interp/engine/interp-indirect.h
@@ -1434,6 +1488,82 @@ index 6a9f7c0..6380ae7 100644
  
  #endif /* THREADED */
  
+diff --git a/src/interp/engine/interp-inlining.h b/src/interp/engine/interp-inlining.h
+index 3339b0e..92777bd 100644
+--- a/src/interp/engine/interp-inlining.h
++++ b/src/interp/engine/interp-inlining.h
+@@ -348,7 +348,11 @@ opc##x##_##y##_##z:
+ 
+ #endif /* USE_CACHE */
+ 
++/* Same safepoint contract as interp-direct.h -- see interp.h.  This engine is
++   only built at JAMVM_ENGINE_LEVEL 3, which we do not ship, but leaving it
++   without a poll would hand the next person a VM that hangs its collector. */
+ #define DISPATCH_FIRST                          \
++    AMIGA_SAFEPOINT                             \
+     goto *pc->handler;
+ 
+ #define DISPATCH_SWITCH
+@@ -359,6 +363,7 @@ opc##x##_##y##_##z:
+     pc++;
+ 
+ #define DISPATCH_METHOD_RET(ins_len)            \
++    AMIGA_SAFEPOINT                             \
+     goto *(++pc)->handler;
+ 
+ #define DISPATCH(level, ins_len)                \
+@@ -368,6 +373,7 @@ opc##x##_##y##_##z:
+     if(TEST) {                                  \
+         pc = (Instruction*) pc->operand.pntr;   \
+ branch_##level##_##type:                        \
++        AMIGA_SAFEPOINT                         \
+         goto *pc->handler;                      \
+     } else                                      \
+         pc++;
+diff --git a/src/interp/engine/interp.h b/src/interp/engine/interp.h
+index e560f69..74fff16 100644
+--- a/src/interp/engine/interp.h
++++ b/src/interp/engine/interp.h
+@@ -99,6 +99,39 @@
+ #define resolvePolyMethod(class, idx) ({ NULL; })
+ #endif
+ 
++/*
++ * Cooperative safepoint.
++ *
++ * clib4's pthread_kill cannot async-interrupt a thread executing bytecode, so
++ * on AmigaOS a thread can only be stopped where it agrees to stop.  Two things
++ * depend on that and BOTH break silently without it:
++ *
++ *   - GC stop-the-world.  suspendThread/suspendAllThreads bump the gate and
++ *     then spin in "while(suspend_state != SUSP_BLOCKING) sched_yield()".  A
++ *     thread running bytecode that never polls never parks, and the collector
++ *     spins there forever.
++ *   - VM shutdown.  exitWakeAllThreads opens the gate permanently and every
++ *     thread is meant to reach threadPollSuspend and exitDetachAndDie; without
++ *     it amiga_exit's drain loop times out and main exits over the top of
++ *     threads that are still running, which then crash on a torn-down context.
++ *
++ * interp-indirect.h has carried this in its DISPATCH_PROLOGUE all along, so it
++ * worked as long as the switch interpreter was the only engine built.  Raising
++ * JAMVM_ENGINE_LEVEL to 2 moved us to interp-direct.h and left the poll behind.
++ * It belongs here, next to the variant selection, so that adding an engine
++ * cannot quietly drop it again.
++ */
++#ifdef __amigaos4__
++extern volatile int suspend_pending_count;
++extern void threadPollSuspend();
++
++#define AMIGA_SAFEPOINT                                    \
++    if(suspend_pending_count)                              \
++        threadPollSuspend();
++#else
++#define AMIGA_SAFEPOINT
++#endif
++
+ /* Include the interpreter variant header */
+ 
+ #ifdef DIRECT
 diff --git a/src/jam.c b/src/jam.c
 index 052f84a..607f16c 100644
 --- a/src/jam.c
@@ -2239,126 +2369,6 @@ index 914c979..0000000
 -int pthread_cond_timedwait(struct CondVariable * cv, struct SignalSemaphore * lock, struct timespec * absoluteTime);
 -
 -#endif
-diff --git a/src/os/amiga/real_amiga_exit.c b/src/os/amiga/real_amiga_exit.c
-new file mode 100644
-index 0000000..728d9bc
---- /dev/null
-+++ b/src/os/amiga/real_amiga_exit.c
-@@ -0,0 +1,114 @@
-+/*
-+ * AmigaOS4 final process teardown for the clib4/OpenJDK build.
-+ *
-+ * The upstream JAmiga scanprocess.c contains a realAmigaExit() that depends on
-+ * the old JAmiga pthread/memory/baseline_glue shims.  In the clib4 build those
-+ * shims are intentionally replaced by clib4's own pthread/scandir/signal/mmap,
-+ * so that implementation cannot be linked.  This file provides a self-contained
-+ * realAmigaExit() that uses only Exec/DOS APIs to terminate remaining child
-+ * tasks before calling _Exit(), avoiding the clib4 "parent waits for children"
-+ * wedge that hangs AWT/Swing shutdown.
-+ */
-+
-+#ifdef __amigaos4__
-+
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <signal.h>
-+
-+#include <proto/exec.h>
-+#include <proto/dos.h>
-+#include <proto/utility.h>
-+
-+#ifndef JA_TRACE
-+#define JA_TRACE(fmt, ...) DebugPrintF(fmt, ##__VA_ARGS__)
-+#endif
-+
-+#define BYTETOBINARYPATTERN "%d%d%d%d %d%d%d%d %d%d%d%d %d%d%d%d"
-+#define BYTETOBINARY(byte)  \
-+  (byte & 0x8000 ? 1 : 0), \
-+  (byte & 0x4000 ? 1 : 0), \
-+  (byte & 0x2000 ? 1 : 0), \
-+  (byte & 0x1000 ? 1 : 0), \
-+  (byte & 0x0800 ? 1 : 0), \
-+  (byte & 0x0400 ? 1 : 0), \
-+  (byte & 0x0200 ? 1 : 0), \
-+  (byte & 0x0100 ? 1 : 0), \
-+  (byte & 0x0080 ? 1 : 0), \
-+  (byte & 0x0040 ? 1 : 0), \
-+  (byte & 0x0020 ? 1 : 0), \
-+  (byte & 0x0010 ? 1 : 0), \
-+  (byte & 0x0008 ? 1 : 0), \
-+  (byte & 0x0004 ? 1 : 0), \
-+  (byte & 0x0002 ? 1 : 0), \
-+  (byte & 0x0001 ? 1 : 0)
-+
-+/**
-+ * ProcessScan() hook: kill (or signal) any child process of the caller.
-+ * We do not try to distinguish Java threads from other children here;
-+ * by the time realAmigaExit() runs the VM has already asked every thread
-+ * to exit cooperatively, so anything still alive is a shutdown straggler.
-+ */
-+STATIC uint32 ASM find_child_kill(REG(a0, struct Hook *hook),
-+                                  REG(a2, struct Process *parentproc),
-+                                  REG(a1, struct Process *proc))
-+{
-+    uint32 sigSet = 0;
-+
-+    if(proc->pr_ParentID == parentproc->pr_ProcessID) {
-+        JA_TRACE("child %ld (%20s) state:"BYTETOBINARYPATTERN"\n",
-+                 proc->pr_ProcessID,
-+                 ((struct Task*)proc)->tc_Node.ln_Name,
-+                 BYTETOBINARY(((struct Task*)proc)->tc_State));
-+
-+        if(proc->pr_Task.tc_State == TS_SUSPENDED) {
-+            JA_TRACE("Removing suspended child %ld\n", proc->pr_ProcessID);
-+            RemTask((struct Task *)proc);
-+            (*(uint32*)hook->h_Data)++;
-+        } else if((proc->pr_Task.tc_State != TS_READY) &&
-+                  (proc->pr_Task.tc_State != TS_REMOVED)) {
-+            sigSet = (1 << SIGKILL);
-+            JA_TRACE("Signalling child %ld with SIGKILL\n", proc->pr_ProcessID);
-+            Signal((struct Task *)proc, sigSet);
-+            (*(uint32*)hook->h_Data)++;
-+        } else {
-+            JA_TRACE("Not signalling ready child %ld\n", proc->pr_ProcessID);
-+        }
-+    }
-+    return 0; /* continue scanning */
-+}
-+
-+/**
-+ * Hard process exit: signal/kill remaining child tasks, then _Exit().
-+ */
-+void realAmigaExit(int error)
-+{
-+    struct Task *me = FindTask(NULL);
-+    struct Hook H;
-+    uint32 proc_count;
-+
-+    JA_TRACE("realAmigaExit(%d)\n", error);
-+
-+    /* Ask DOS to notify us when the process list changes. */
-+    NotifyProcListChange((struct Process *)me, SIGBREAKB_CTRL_F, 0);
-+
-+    H.h_Entry = (APTR)&find_child_kill;
-+    H.h_Data = &proc_count;
-+
-+    do {
-+        proc_count = 0;
-+        ProcessScan(&H, (APTR)me, 0);
-+
-+        if(proc_count > 0) {
-+            JA_TRACE("Waiting for %ld children to die\n", proc_count);
-+            Wait(SIGBREAKF_CTRL_F);
-+        }
-+    } while(proc_count > 0);
-+
-+    NotifyProcListChange(NULL, NPLC_END, 0);
-+
-+    JA_TRACE("realAmigaExit: calling _Exit(%d)\n", error);
-+    _Exit(error);
-+}
-+
-+#endif /* __amigaos4__ */
 diff --git a/src/os/amiga/sched.h b/src/os/amiga/sched.h
 deleted file mode 100644
 index cfe68d2..0000000
@@ -2689,7 +2699,7 @@ index b453d7b..9793439 100644
      setOSProperties(properties);
      setUserDirProperty(properties);
 diff --git a/src/thread.c b/src/thread.c
-index e4fb7d1..341ce18 100644
+index e4fb7d1..b5b4200 100644
 --- a/src/thread.c
 +++ b/src/thread.c
 @@ -110,6 +110,12 @@ static int threads_waiting_to_start = 0;
@@ -2873,7 +2883,7 @@ index e4fb7d1..341ce18 100644
      if(threads_waiting_to_start) {
          TRACE("%d threads waiting to start...\n", threads_waiting_to_start);
          pthread_cond_broadcast(&cv);
-@@ -991,6 +1083,112 @@ void resumeAllThreads(Thread *self) {
+@@ -991,6 +1083,129 @@ void resumeAllThreads(Thread *self) {
      pthread_mutex_unlock(&lock);
  }
  
@@ -2949,6 +2959,13 @@ index e4fb7d1..341ce18 100644
 +    pthread_mutex_unlock(&lock);
 +}
 +
++/* Same as exitDetachAndDie for the calling thread: used by amiga_exit() when a
++   non-main thread starts the shutdown and has to remove itself from the count
++   main is waiting on.  A plain pthread_exit() there would leave the Thread
++   linked and threads_count too high, and main would wait out its whole timeout
++   for a thread that had already gone. */
++void exitDetachAndDieSelf(void);
++
 +static void exitDetachAndDie(Thread *thread) {
 +    pthread_mutex_lock(&lock);
 +    if((thread->prev->next = thread->next))
@@ -2956,6 +2973,16 @@ index e4fb7d1..341ce18 100644
 +    threads_count--;
 +    pthread_mutex_unlock(&lock);
 +    pthread_exit(NULL);
++}
++
++void exitDetachAndDieSelf(void) {
++    Thread *self = threadSelf();
++
++    /* main is the list head and has no prev; it must never unlink itself. */
++    if(self == NULL || self == &main_thread || self->prev == NULL)
++        pthread_exit(NULL);
++
++    exitDetachAndDie(self);
 +}
 +
 +void threadPollSuspend() {
@@ -2986,7 +3013,7 @@ index e4fb7d1..341ce18 100644
  static void suspendLoop(Thread *thread) {
      char old_state = thread->suspend_state;
      sigjmp_buf env;
-@@ -1012,6 +1210,7 @@ static void suspendLoop(Thread *thread) {
+@@ -1012,6 +1227,7 @@ static void suspendLoop(Thread *thread) {
      thread->suspend_state = old_state;
      MBARRIER();
  }
@@ -2994,7 +3021,7 @@ index e4fb7d1..341ce18 100644
  
  static void suspendHandler(int sig) {
      Thread *thread = threadSelf();
-@@ -1138,8 +1337,21 @@ static void initialiseSignalMask() {
+@@ -1138,8 +1354,21 @@ static void initialiseSignalMask() {
      sigset_t mask;
  
      sigemptyset(&mask);
@@ -3016,7 +3043,7 @@ index e4fb7d1..341ce18 100644
      sigaddset(&mask, SIGPIPE);
      sigprocmask(SIG_BLOCK, &mask, NULL);
  }
-@@ -1234,6 +1446,21 @@ Object *runningThreadObjects() {
+@@ -1234,6 +1463,21 @@ Object *runningThreadObjects() {
  
  void exitVM(int status) {
      main_exited = TRUE;
@@ -3038,7 +3065,7 @@ index e4fb7d1..341ce18 100644
  
      /* Execute System.exit() to run any registered shutdown hooks.
         In the unlikely event that System.exit() can't be found, or
-@@ -1248,22 +1475,37 @@ void exitVM(int status) {
+@@ -1248,22 +1492,37 @@ void exitVM(int status) {
          }
      }
  
@@ -3076,7 +3103,7 @@ index e4fb7d1..341ce18 100644
  }
  
  void mainThreadSetContextClassLoader(Object *loader) {
-@@ -1324,6 +1566,13 @@ int initialiseThreadStage1(InitArgs *args) {
+@@ -1324,6 +1583,13 @@ int initialiseThreadStage1(InitArgs *args) {
      return TRUE;
  }
  
@@ -3090,7 +3117,7 @@ index e4fb7d1..341ce18 100644
  int initialiseThreadStage2(InitArgs *args) {
      Class *thrdGrp_class;
      Object *main_group, *java_thread;
-@@ -1332,9 +1581,11 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1332,9 +1598,11 @@ int initialiseThreadStage2(InitArgs *args) {
      MethodBlock *run, *remove_thread;
  
      /* Load thread class and register reference for compaction threading */
@@ -3102,7 +3129,7 @@ index e4fb7d1..341ce18 100644
      registerStaticClassRef(&thread_class);
  
      name = findField(thread_class, SYMBOL(name), classlibThreadNameType());
-@@ -1378,11 +1629,13 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1378,11 +1646,13 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Classlib specific initialisation prior to main thread being
         setup */
@@ -3116,7 +3143,7 @@ index e4fb7d1..341ce18 100644
      java_thread = initJavaThread(&main_thread, FALSE, "main", main_group);
      if(java_thread == NULL)
          goto error;
-@@ -1391,19 +1644,33 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1391,19 +1661,33 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Setup signal handling.  This will be inherited by all
         threads created within Java */
