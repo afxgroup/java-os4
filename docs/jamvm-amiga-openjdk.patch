@@ -1,5 +1,5 @@
 diff --git a/src/alloc.c b/src/alloc.c
-index 536c720..f140ddd 100644
+index 536c720..385a016 100644
 --- a/src/alloc.c
 +++ b/src/alloc.c
 @@ -191,6 +191,12 @@ static VMLock registered_refs_lock;
@@ -92,7 +92,17 @@ index 536c720..f140ddd 100644
  int initialiseGC(InitArgs *args) {
      /* Pre-allocate an OutOfMemoryError exception object - we throw it
       * when we're really low on heap space, and can create FA... */
-@@ -2075,8 +2137,14 @@ got_it:
+@@ -2023,7 +2085,8 @@ void *gcMalloc(int len) {
+ 
+                 state = throw_oom;
+                 unlockVMLock(heap_lock, self);
+-                signalException(java_lang_OutOfMemoryError, NULL);
++                /* the genuinely-out-of-heap case; say which one this is */
++                signalException(java_lang_OutOfMemoryError, "Java heap space");
+                 return NULL;
+                 break;
+ 
+@@ -2075,8 +2138,14 @@ got_it:
      Thread *self;                                                             \
      disableSuspend(self = threadSelf());                                      \
      lockVMLock(has_fnlzr_lock, self);                                         \
@@ -109,6 +119,26 @@ index 536c720..f140ddd 100644
      if(has_finaliser_count == has_finaliser_size) {                           \
          has_finaliser_size += LIST_INCREMENT;                                 \
          has_finaliser_list = sysRealloc(has_finaliser_list,                   \
+@@ -2116,9 +2185,17 @@ Object *allocObject(Class *class) {
+ Object *allocArray(Class *class, int size, int el_size) {
+     Object *ob;
+ 
+-    /* Special check to protect against integer overflow */
++    /* Special check to protect against integer overflow.  Say so: this is NOT
++       heap exhaustion -- no GC has even been attempted -- but a request for an
++       impossible array length, and a bare OutOfMemoryError with no message is
++       indistinguishable from the real thing.  That cost a long hunt once, when
++       a bad `new Node[n]` length out of ConcurrentHashMap's constructor looked
++       exactly like a heap too small to hold java.util.Locale. */
+     if(size > (INT_MAX - sizeof(uintptr_t) - sizeof(Object)) / el_size) {
+-        signalException(java_lang_OutOfMemoryError, NULL);
++        char buff[64];
++
++        snprintf(buff, sizeof(buff), "array length %d too large", size);
++        signalException(java_lang_OutOfMemoryError, buff);
+         return NULL;
+     }
+ 
 diff --git a/src/class.c b/src/class.c
 index af81530..0523294 100644
 --- a/src/class.c
