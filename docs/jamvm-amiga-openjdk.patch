@@ -1,5 +1,5 @@
 diff --git a/src/alloc.c b/src/alloc.c
-index 536c720..1cb0c57 100644
+index 536c720..385a016 100644
 --- a/src/alloc.c
 +++ b/src/alloc.c
 @@ -191,6 +191,12 @@ static VMLock registered_refs_lock;
@@ -15,7 +15,41 @@ index 536c720..1cb0c57 100644
  /* A pointer to the finalizer thread. */
  static Thread *finalizer_thread;
  
-@@ -1788,6 +1794,13 @@ void asyncGCThreadLoop(Thread *self) {
+@@ -289,6 +295,33 @@ void clearMarkBits() {
+ int initialiseAlloc(InitArgs *args) {
+     char *mem = (char*)mmap(0, args->max_heap, PROT_READ|PROT_WRITE,
+                                                MAP_PRIVATE|MAP_ANON, -1, 0);
++
++#ifdef __amigaos4__
++    /* The whole max_heap is mapped here, once, and the heap only ever grows
++       INSIDE it -- so max_heap is really "how big a single MAP_ANON can we
++       get".  clib4 refuses large ones, and the VM used to just abort, which is
++       why nativePhysicalMemory() reported a fake 64MB and left every AmigaOS
++       user with a 16MB heap that could not grow.
++
++       Halve and retry instead.  The default can then be sized from real memory
++       and simply settles on whatever this machine can actually map, rather than
++       everyone paying for the worst case.  Stop at MIN_MIN_HEAP: below that the
++       VM cannot run anyway, and the original error is the right one to report. */
++    while(mem == MAP_FAILED && args->max_heap > MIN_MIN_HEAP) {
++        args->max_heap /= 2;
++
++        if(args->min_heap > args->max_heap)
++            args->min_heap = args->max_heap;
++
++        mem = (char*)mmap(0, args->max_heap, PROT_READ|PROT_WRITE,
++                                             MAP_PRIVATE|MAP_ANON, -1, 0);
++        if(mem != MAP_FAILED)
++            jam_fprintf(stderr, "Note: could not map the default heap; "
++                                "settled on %ldMB (-Xmx overrides)\n",
++                                (long)(args->max_heap / MB));
++    }
++#endif
++
+     if(mem == MAP_FAILED) {
+         perror("Couldn't allocate the heap; try reducing the max "
+                "heap size (-Xmx)");
+@@ -1788,6 +1821,13 @@ void asyncGCThreadLoop(Thread *self) {
      for(;;) {                                                                 \
          waitVMWaitLock(list##_lock, self);                                    \
                                                                                \
@@ -29,7 +63,7 @@ index 536c720..1cb0c57 100644
          if((list##_start == list##_size) && (list##_end == 0))                \
              continue;                                                         \
                                                                                \
-@@ -1846,6 +1859,28 @@ void referenceHandlerThreadLoop(Thread *self) {
+@@ -1846,6 +1886,28 @@ void referenceHandlerThreadLoop(Thread *self) {
                          "<GC: enqueuing %d references>\n", self, &self);
  }
  
@@ -58,7 +92,17 @@ index 536c720..1cb0c57 100644
  int initialiseGC(InitArgs *args) {
      /* Pre-allocate an OutOfMemoryError exception object - we throw it
       * when we're really low on heap space, and can create FA... */
-@@ -2075,8 +2110,14 @@ got_it:
+@@ -2023,7 +2085,8 @@ void *gcMalloc(int len) {
+ 
+                 state = throw_oom;
+                 unlockVMLock(heap_lock, self);
+-                signalException(java_lang_OutOfMemoryError, NULL);
++                /* the genuinely-out-of-heap case; say which one this is */
++                signalException(java_lang_OutOfMemoryError, "Java heap space");
+                 return NULL;
+                 break;
+ 
+@@ -2075,8 +2138,14 @@ got_it:
      Thread *self;                                                             \
      disableSuspend(self = threadSelf());                                      \
      lockVMLock(has_fnlzr_lock, self);                                         \
@@ -75,6 +119,26 @@ index 536c720..1cb0c57 100644
      if(has_finaliser_count == has_finaliser_size) {                           \
          has_finaliser_size += LIST_INCREMENT;                                 \
          has_finaliser_list = sysRealloc(has_finaliser_list,                   \
+@@ -2116,9 +2185,17 @@ Object *allocObject(Class *class) {
+ Object *allocArray(Class *class, int size, int el_size) {
+     Object *ob;
+ 
+-    /* Special check to protect against integer overflow */
++    /* Special check to protect against integer overflow.  Say so: this is NOT
++       heap exhaustion -- no GC has even been attempted -- but a request for an
++       impossible array length, and a bare OutOfMemoryError with no message is
++       indistinguishable from the real thing.  That cost a long hunt once, when
++       a bad `new Node[n]` length out of ConcurrentHashMap's constructor looked
++       exactly like a heap too small to hold java.util.Locale. */
+     if(size > (INT_MAX - sizeof(uintptr_t) - sizeof(Object)) / el_size) {
+-        signalException(java_lang_OutOfMemoryError, NULL);
++        char buff[64];
++
++        snprintf(buff, sizeof(buff), "array length %d too large", size);
++        signalException(java_lang_OutOfMemoryError, buff);
+         return NULL;
+     }
+ 
 diff --git a/src/class.c b/src/class.c
 index af81530..0523294 100644
 --- a/src/class.c
@@ -878,10 +942,119 @@ index 71fc8aa..0ee57ac 100644
          } while(sig == NSIG);
  
 diff --git a/src/config.h b/src/config.h
-index dd2b875..08dffc6 100644
+index dd2b875..a001b80 100644
 --- a/src/config.h
 +++ b/src/config.h
-@@ -186,7 +186,12 @@
+@@ -27,8 +27,7 @@
+ /* Define to 1 if using `alloca.c'. */
+ /* #undef C_ALLOCA */
+ 
+-/* interpreter direct */
+-/* #undef DIRECT */
++/* interpreter direct -- see the engine block near THREADED below */
+ /* Define to 1 if you have `alloca', as a function or macro. */
+ //#define HAVE_ALLOCA 1
+ 
+@@ -115,8 +114,7 @@
+ /* Define to 1 if you have the <unistd.h> header file. */
+ #define HAVE_UNISTD_H 1
+ 
+-/* interpreter inlining */
+-/* #undef INLINING */
++/* interpreter inlining -- see the engine block near THREADED below */
+ 
+ /* Installation directory (prefix) */
+ #define INSTALL_DIR "JAmiga:jvm"
+@@ -140,12 +138,12 @@
+ /* Define to the version of this package. */
+ #define PACKAGE_VERSION ""
+ 
+-/* interpreter uses prefetching */
+-/* #undef PREFETCH */
++/* interpreter uses prefetching -- see the engine block near THREADED below */
+ 
+-/* compute relocatability at runtime */
+-#undef RUNTIME_RELOC_CHECKS
+-/*#define RUNTIME_RELOC_CHECKS */
++/* Compute the relocatability of each handler at runtime rather than at build
++   time.  Upstream defaults this to on when cross-compiling, which we always
++   are: the build machine cannot run the ppc handlers to measure them. */
++#define RUNTIME_RELOC_CHECKS 1
+ 
+ /* If using the C implementation of alloca, define if you know the
+    direction of stack growth for your system; otherwise it will be
+@@ -158,17 +156,59 @@
+ /* Define to 1 if you have the ANSI C header files. */
+ #define STDC_HEADERS 1
+ 
+-/* interpreter threaded */
+-#undef THREADED
+-/* comment these, and we're back to normal (change makefiles also*/
+-/*
+-*/
+-
+-// Something's wrong wioht the INLINING
+-//#define INLINING
+-#undef INLINING
+-/*#define THREADED*/
+-#undef DIRECT
++/* Interpreter engine selection -- JAMVM_ENGINE_LEVEL, set by tools/build-jamvm-*.sh
++ * from the JAMVM_ENGINE environment variable so the level can be changed without
++ * editing this file:
++ *
++ *   0 switch    plain switch dispatch.  What this port used to build, and the
++ *               slowest thing JamVM can do.
++ *   1 threaded  computed-goto dispatch + stack caching (top of the operand
++ *               stack kept in registers)
++ *   2 direct    + bytecode rewritten to handler addresses on first execution,
++ *               so dispatch costs no decode, + prefetching (which upstream
++ *               enables only on powerpc)
++ *   3 inline    + the code-copying engine: it copies the handlers' own machine
++ *               code into a per-block buffer, so dispatch disappears entirely
++ *               inside a basic block.  This is as close to a JIT as JamVM has.
++ *               PowerPC supports it: arch/powerpc.h implements the two things
++ *               it needs, FLUSH_CACHE (icache sync after copying code) and
++ *               GEN_REL_JMP (the relative branch it patches in).
++ *
++ * Upstream enables level 3 by default for powerpc.  We default to 2, because
++ * level 3 has been observed on AmigaOS 4 to compute WRONG ANSWERS -- see
++ * docs/ppc32-performance.md.  It is intermittent (inlining is profile-driven,
++ * so a block is only copied once it has run often enough) and it corrupts
++ * floating point rather than crashing: ConcurrentHashMap's constructor computed
++ * a capacity of 2^30 out of `(long)(1.0 + initialCapacity / loadFactor)` and
++ * every run died differently.  Silent wrong arithmetic is not something to ship
++ * as a default.
++ *
++ * Level 2 keeps everything except the code copying, which is where the risk is.
++ * To experiment with 3:
++ *
++ *     JAMVM_ENGINE=3 make -f Makefile.local vm
++ *
++ * Level 3 also needs -fno-reorder-blocks on the interpreter translation units
++ * (the build scripts add it) so gcc keeps each handler body contiguous and does
++ * not splice shared tails between them.
++ */
++#ifndef JAMVM_ENGINE_LEVEL
++#define JAMVM_ENGINE_LEVEL 2
++#endif
++
++#if JAMVM_ENGINE_LEVEL >= 1
++#define THREADED 1
++#define USE_CACHE 1
++#endif
++
++#if JAMVM_ENGINE_LEVEL >= 2
++#define DIRECT 1
++#define PREFETCH 1
++#endif
++
++#if JAMVM_ENGINE_LEVEL >= 3
++#define INLINING 1
++#endif
+ 
+ /* Define to 1 if you can safely include both <sys/time.h> and <time.h>. */
+ #define TIME_WITH_SYS_TIME 1
+@@ -186,7 +226,12 @@
  #undef TRACEDLL
  
  /* defined if object finalisation tracing enabled for debugging */
@@ -895,6 +1068,16 @@ index dd2b875..08dffc6 100644
  
  /* defined if gc tracing enabled for debugging */
  //#define TRACEGC 0
+@@ -200,8 +245,7 @@
+ /* defined if thread creation tracing enabled for debugging */
+ #undef TRACETHREAD
+ 
+-/* interpreter uses caching */
+-/* #undef USE_CACHE */
++/* interpreter uses caching -- see the engine block near THREADED below */
+ 
+ /* use FFI */
+ /* #undef USE_FFI */
 diff --git a/src/dll.c b/src/dll.c
 index 3604fcf..654c63c 100644
 --- a/src/dll.c
@@ -1252,7 +1435,7 @@ index 6a9f7c0..6380ae7 100644
  #endif /* THREADED */
  
 diff --git a/src/jam.c b/src/jam.c
-index 052f84a..0d4c196 100644
+index 052f84a..607f16c 100644
 --- a/src/jam.c
 +++ b/src/jam.c
 @@ -32,10 +32,19 @@
@@ -1343,7 +1526,7 @@ index 052f84a..0d4c196 100644
                  /* Compatibility options */
                  } else if(strcmp(argv[i], "-client") == 0 ||
                            strcmp(argv[i], "-server") == 0) {
-@@ -251,10 +286,26 @@ int main(int argc, char *argv[]) {
+@@ -251,10 +286,40 @@ int main(int argc, char *argv[]) {
          exit(1);
      }
  
@@ -1358,9 +1541,23 @@ index 052f84a..0d4c196 100644
 +       a -classpath entry (URLClassPath) still fails -- Amiga "volume:" path -> URL
 +       (Phase 3 TODO); -Xbootclasspath is the working path meanwhile. */
 +    system_loader = getSystemClassLoader();
-+    if(system_loader == NULL)
-+        clearException();
-+    else
++    if(system_loader == NULL) {
++        /* Keep the fallback -- classes on -Xbootclasspath still load through the
++           bootstrap loader -- but do NOT swallow the reason, as this used to.
++           Without the system loader the -classpath is not searched at all, so
++           the main-class lookup below fails and reports "NoClassDefFoundError:
++           <your class>", sending you after a classpath bug that does not exist.
++           The -jar path disguises it further: JarLauncher lives on the boot
++           class path, so it loads anyway and the run only breaks later, which
++           makes -cp look broken and -jar look fine.  (Seen for real: a 16MB
++           non-growable heap made sun.misc.Launcher's initialiser throw
++           OutOfMemoryError, and every symptom pointed somewhere else.) */
++        jam_fprintf(stderr, "Warning: the system class loader failed to "
++                            "initialise, so -classpath will NOT be searched "
++                            "and only -Xbootclasspath classes can load.  "
++                            "The underlying error was:\n");
++        printException();
++    } else
 +        mainThreadSetContextClassLoader(system_loader);
 +#else
 +    if((system_loader = getSystemClassLoader()) == NULL)
@@ -1371,7 +1568,7 @@ index 052f84a..0d4c196 100644
  
      for(cpntr = argv[class_arg]; *cpntr; cpntr++)
          if(*cpntr == '.')
-@@ -301,6 +352,5 @@ error:
+@@ -301,6 +366,5 @@ error:
      mainThreadWaitToExitVM();
      exitVM(status);
  
@@ -1445,10 +1642,10 @@ index 6edb60b..6886837 100644
  }
  
 diff --git a/src/os/amiga/os.c b/src/os/amiga/os.c
-index 5561c20..55f0be7 100644
+index 5561c20..b72d22d 100644
 --- a/src/os/amiga/os.c
 +++ b/src/os/amiga/os.c
-@@ -19,241 +19,191 @@
+@@ -19,241 +19,211 @@
   * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
   */
  
@@ -1530,12 +1727,32 @@ index 5561c20..55f0be7 100644
 -#endif
 -} JamLibraryInfo ;
 +long long nativePhysicalMemory() {
-+    /* Report a modest figure so the default heap (phys/4) stays small: clib4's
-+       mmap currently fails for very large MAP_ANON regions (a multi-hundred-MB
-+       default heap from reporting true RAM aborts initialiseAlloc). 64 MB ->
-+       16 MB default max heap, which clib4 mmap handles. -Xmx overrides this.
-+       TODO: investigate clib4 large-mmap limit and raise this. */
-+    return 64LL * 1024 * 1024;
++    /* Drives the default heap: JamVM takes max_heap = phys/4, min_heap = phys/64
++       (both clamped to >= MIN_MIN_HEAP = 16MB, <= MAX_MAX_HEAP = 1GB).
++
++       This used to return a flat 64MB, which looks conservative but is worse
++       than it reads: 64/4 = 16MB max, and 64/64 = 1MB min clamps UP to 16MB, so
++       min == max and the heap could never grow past 16MB.  Anything that needed
++       more died with OutOfMemoryError -- java.util.Locale's class initialiser
++       was enough, and the NoClassDefFoundError that followed named Locale while
++       the actual fault was the heap.
++
++       The flat number was there because initialiseAlloc() mmaps the WHOLE
++       max_heap in one go at startup, and reporting true RAM on a 2GB machine
++       asked clib4 for a 512MB MAP_ANON, which fails and aborts the VM.  That is
++       now handled where it belongs -- initialiseAlloc halves and retries -- so
++       report the real figure and let it settle on what the system can actually
++       give.  Capped at 1GB so the first attempt stays sane on a big machine;
++       -Xmx still overrides everything. */
++    uint64 total = AvailMem(MEMF_TOTAL);
++
++    if(total == 0)                       /* AvailMem should not fail; be safe */
++        return 256LL * 1024 * 1024;
++
++    if(total > 1024LL * 1024 * 1024)
++        total = 1024LL * 1024 * 1024;
++
++    return (long long)total;
 +}
  
  void *nativeStackBase() {
@@ -2472,7 +2689,7 @@ index b453d7b..9793439 100644
      setOSProperties(properties);
      setUserDirProperty(properties);
 diff --git a/src/thread.c b/src/thread.c
-index e4fb7d1..9aa64db 100644
+index e4fb7d1..341ce18 100644
 --- a/src/thread.c
 +++ b/src/thread.c
 @@ -110,6 +110,12 @@ static int threads_waiting_to_start = 0;
@@ -2505,7 +2722,42 @@ index e4fb7d1..9aa64db 100644
  int getPeakThreadsCount() {
      return peak_threads_count;
  }
-@@ -787,10 +803,18 @@ void detachJNIThread(Thread *thread) {
+@@ -613,8 +629,33 @@ void *detachThread(Thread *thread) {
+     Object *group = INST_DATA(java_thread, Object*, group_offset);
+ 
+     /* If there's an exception pending, it is uncaught */
+-    if(exceptionOccurred0(ee))
++    if(exceptionOccurred0(ee)) {
++#ifdef __amigaos4__
++        /* ...unless we are the ones who caused it.  Shutting the VM down here
++           means interrupting every thread out of Object.wait/sleep so it can
++           self-terminate (see exitWakeAllThreads: clib4's exit() waits for all
++           pthread children, so a thread left alive wedges the process).  A
++           thread woken that way sees an InterruptedException and gets to run its
++           catch block first, and code that treats an interrupt as impossible
++           turns it into something alarming --
++
++             Exception in thread "SeedGenerator Thread" java.lang.InternalError:
++               internal error: SeedGenerator thread generated an exception.
++               Caused by: java.lang.InterruptedException
++
++           printed AFTER a run that succeeded.  A stock JVM never shows this:
++           daemon threads are simply abandoned, never resumed to unwind.  Stay
++           quiet once vm_exiting is set -- the VM is going away and this is our
++           own interrupt coming back to us.  Exceptions during normal running
++           are unaffected. */
++        extern volatile int vm_exiting;
++
++        if(vm_exiting)
++            clearException();
++        else
++#endif
+         uncaughtException();
++    }
+ 
+     /* Don't do anything if this is the main thread */
+     if(thread->prev == NULL)
+@@ -787,10 +828,18 @@ void detachJNIThread(Thread *thread) {
      detachThread(thread);
  }
  
@@ -2524,7 +2776,7 @@ index e4fb7d1..9aa64db 100644
      if(main_exited)
          return NULL;
  
-@@ -798,9 +822,32 @@ static void *shell(void *args) {
+@@ -798,9 +847,32 @@ static void *shell(void *args) {
         exist.  As the root group is main, we add it to that for now... */
      attachThread(((char**)args)[0], TRUE, &self, self,
                   INST_DATA(main_ee.thread, Object*, group_offset));
@@ -2557,7 +2809,7 @@ index e4fb7d1..9aa64db 100644
      return NULL;
  }
  
-@@ -814,7 +861,14 @@ void createVMThread(char *name, void (*start)(Thread*)) {
+@@ -814,7 +886,14 @@ void createVMThread(char *name, void (*start)(Thread*)) {
      args[2] = thread;
  
      memset(thread, 0, sizeof(Thread));
@@ -2573,7 +2825,7 @@ index e4fb7d1..9aa64db 100644
  
      /* Wait for thread to start */
  
-@@ -822,6 +876,7 @@ void createVMThread(char *name, void (*start)(Thread*)) {
+@@ -822,6 +901,7 @@ void createVMThread(char *name, void (*start)(Thread*)) {
      while(classlibGetThreadState(thread) == CREATING)
          pthread_cond_wait(&cv, &lock);
      pthread_mutex_unlock(&lock);
@@ -2581,7 +2833,7 @@ index e4fb7d1..9aa64db 100644
  }
  
  Object *runningThreadStackTrace(Thread *thread, int max_depth,
-@@ -868,6 +923,9 @@ Object *runningThreadStackTrace(Thread *thread, int max_depth,
+@@ -868,6 +948,9 @@ Object *runningThreadStackTrace(Thread *thread, int max_depth,
  }
  
  void suspendThread(Thread *thread) {
@@ -2591,7 +2843,7 @@ index e4fb7d1..9aa64db 100644
      thread->suspend = TRUE;
      MBARRIER();
  
-@@ -900,6 +958,9 @@ void resumeThread(Thread *thread) {
+@@ -900,6 +983,9 @@ void resumeThread(Thread *thread) {
                thread->id);
          sched_yield();
      }
@@ -2601,7 +2853,7 @@ index e4fb7d1..9aa64db 100644
  }
  
  void suspendAllThreads(Thread *self) {
-@@ -907,6 +968,9 @@ void suspendAllThreads(Thread *self) {
+@@ -907,6 +993,9 @@ void suspendAllThreads(Thread *self) {
  
      TRACE("Thread %p id: %d is suspending all threads\n", self, self->id);
      pthread_mutex_lock(&lock);
@@ -2611,7 +2863,7 @@ index e4fb7d1..9aa64db 100644
  
      for(thread = &main_thread; thread != NULL; thread = thread->next) {
          if(thread == self)
-@@ -982,6 +1046,9 @@ void resumeAllThreads(Thread *self) {
+@@ -982,6 +1071,9 @@ void resumeAllThreads(Thread *self) {
      }
  
      all_threads_suspended = FALSE;
@@ -2621,7 +2873,7 @@ index e4fb7d1..9aa64db 100644
      if(threads_waiting_to_start) {
          TRACE("%d threads waiting to start...\n", threads_waiting_to_start);
          pthread_cond_broadcast(&cv);
-@@ -991,6 +1058,112 @@ void resumeAllThreads(Thread *self) {
+@@ -991,6 +1083,112 @@ void resumeAllThreads(Thread *self) {
      pthread_mutex_unlock(&lock);
  }
  
@@ -2734,7 +2986,7 @@ index e4fb7d1..9aa64db 100644
  static void suspendLoop(Thread *thread) {
      char old_state = thread->suspend_state;
      sigjmp_buf env;
-@@ -1012,6 +1185,7 @@ static void suspendLoop(Thread *thread) {
+@@ -1012,6 +1210,7 @@ static void suspendLoop(Thread *thread) {
      thread->suspend_state = old_state;
      MBARRIER();
  }
@@ -2742,7 +2994,7 @@ index e4fb7d1..9aa64db 100644
  
  static void suspendHandler(int sig) {
      Thread *thread = threadSelf();
-@@ -1138,8 +1312,21 @@ static void initialiseSignalMask() {
+@@ -1138,8 +1337,21 @@ static void initialiseSignalMask() {
      sigset_t mask;
  
      sigemptyset(&mask);
@@ -2764,7 +3016,7 @@ index e4fb7d1..9aa64db 100644
      sigaddset(&mask, SIGPIPE);
      sigprocmask(SIG_BLOCK, &mask, NULL);
  }
-@@ -1234,6 +1421,21 @@ Object *runningThreadObjects() {
+@@ -1234,6 +1446,21 @@ Object *runningThreadObjects() {
  
  void exitVM(int status) {
      main_exited = TRUE;
@@ -2786,7 +3038,7 @@ index e4fb7d1..9aa64db 100644
  
      /* Execute System.exit() to run any registered shutdown hooks.
         In the unlikely event that System.exit() can't be found, or
-@@ -1248,22 +1450,37 @@ void exitVM(int status) {
+@@ -1248,22 +1475,37 @@ void exitVM(int status) {
          }
      }
  
@@ -2824,7 +3076,7 @@ index e4fb7d1..9aa64db 100644
  }
  
  void mainThreadSetContextClassLoader(Object *loader) {
-@@ -1324,6 +1541,13 @@ int initialiseThreadStage1(InitArgs *args) {
+@@ -1324,6 +1566,13 @@ int initialiseThreadStage1(InitArgs *args) {
      return TRUE;
  }
  
@@ -2838,7 +3090,7 @@ index e4fb7d1..9aa64db 100644
  int initialiseThreadStage2(InitArgs *args) {
      Class *thrdGrp_class;
      Object *main_group, *java_thread;
-@@ -1332,9 +1556,11 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1332,9 +1581,11 @@ int initialiseThreadStage2(InitArgs *args) {
      MethodBlock *run, *remove_thread;
  
      /* Load thread class and register reference for compaction threading */
@@ -2850,7 +3102,7 @@ index e4fb7d1..9aa64db 100644
      registerStaticClassRef(&thread_class);
  
      name = findField(thread_class, SYMBOL(name), classlibThreadNameType());
-@@ -1378,11 +1604,13 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1378,11 +1629,13 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Classlib specific initialisation prior to main thread being
         setup */
@@ -2864,7 +3116,7 @@ index e4fb7d1..9aa64db 100644
      java_thread = initJavaThread(&main_thread, FALSE, "main", main_group);
      if(java_thread == NULL)
          goto error;
-@@ -1391,19 +1619,33 @@ int initialiseThreadStage2(InitArgs *args) {
+@@ -1391,19 +1644,33 @@ int initialiseThreadStage2(InitArgs *args) {
  
      /* Setup signal handling.  This will be inherited by all
         threads created within Java */
