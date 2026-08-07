@@ -18,6 +18,17 @@ set -e
 
 . "$(dirname "$0")/build-env.sh"
 
+# Apply docs/openjdk8-amiga.patch HERE, at the head of the pipeline, on a tree
+# that is still pristine.  It used to be applied only by build-awt-natives.sh,
+# which runs second -- by then this script's own seds have adapted 19 of the 20
+# files the patch describes, so the tree matched neither the pristine state
+# (forward apply fails) nor the patched one (reverse apply fails, because rect.h
+# is adapted by the awt script alone).  The result was a "cannot apply OpenJDK
+# patch cleanly" warning on every clean build, even though the end state was
+# correct.  Applied first, the patch goes on in full and every sed below becomes
+# the no-op its guard intends.
+apply_openjdk_patch
+
 SDKCLIB4=$SDK_CLIB4
 if [ -n "${CLIB4_BUILD_ROOT:-}" ] && [ -d "$CLIB4_BUILD_ROOT/build/lib" ]; then
     cp -f "$CLIB4_BUILD_ROOT"/build/lib/*.a "$CLIB4_BUILD_ROOT"/build/lib/*.o "$SDKCLIB4/lib/" 2>/dev/null || true

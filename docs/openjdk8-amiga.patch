@@ -34,6 +34,58 @@ index 3245dea506..72297b0c25 100644
  #ifdef WIN32
      const DWORD access =
          (flags & O_RDWR)   ? (GENERIC_WRITE | GENERIC_READ) :
+diff --git a/jdk/src/share/native/sun/security/ec/impl/ecc_impl.h b/jdk/src/share/native/sun/security/ec/impl/ecc_impl.h
+index 48aa13a4b0..eee5588a07 100644
+--- a/jdk/src/share/native/sun/security/ec/impl/ecc_impl.h
++++ b/jdk/src/share/native/sun/security/ec/impl/ecc_impl.h
+@@ -58,7 +58,7 @@ typedef unsigned long ulong_t;
+ typedef enum { B_FALSE, B_TRUE } boolean_t;
+ #endif /* __linux__ */
+ 
+-#ifdef _ALLBSD_SOURCE
++#if defined(_ALLBSD_SOURCE) || defined(__amigaos4__)
+ #include <stdint.h>
+ #define B_FALSE FALSE
+ #define B_TRUE TRUE
+diff --git a/jdk/src/share/native/sun/security/ec/impl/ecdecode.c b/jdk/src/share/native/sun/security/ec/impl/ecdecode.c
+index 65280221b9..94621c4756 100644
+--- a/jdk/src/share/native/sun/security/ec/impl/ecdecode.c
++++ b/jdk/src/share/native/sun/security/ec/impl/ecdecode.c
+@@ -40,7 +40,7 @@
+ #include <sys/types.h>
+ 
+ #ifndef _WIN32
+-#if !defined(__linux__) && !defined(_ALLBSD_SOURCE)
++#if !defined(__linux__) && !defined(_ALLBSD_SOURCE) && !defined(__amigaos4__)
+ #include <sys/systm.h>
+ #endif /* __linux__ || _ALLBSD_SOURCE */
+ #include <sys/param.h>
+diff --git a/jdk/src/share/native/sun/security/ec/impl/oid.c b/jdk/src/share/native/sun/security/ec/impl/oid.c
+index 6239ec4ddf..eed91187b4 100644
+--- a/jdk/src/share/native/sun/security/ec/impl/oid.c
++++ b/jdk/src/share/native/sun/security/ec/impl/oid.c
+@@ -39,7 +39,7 @@
+ #include <sys/types.h>
+ 
+ #ifndef _WIN32
+-#if !defined(__linux__) && !defined(_ALLBSD_SOURCE)
++#if !defined(__linux__) && !defined(_ALLBSD_SOURCE) && !defined(__amigaos4__)
+ #include <sys/systm.h>
+ #endif /* __linux__ || _ALLBSD_SOURCE */
+ #include <sys/param.h>
+diff --git a/jdk/src/share/native/sun/security/ec/impl/secitem.c b/jdk/src/share/native/sun/security/ec/impl/secitem.c
+index fab4415f26..92103fa9ad 100644
+--- a/jdk/src/share/native/sun/security/ec/impl/secitem.c
++++ b/jdk/src/share/native/sun/security/ec/impl/secitem.c
+@@ -44,7 +44,7 @@
+ #include <sys/types.h>
+ 
+ #ifndef _WIN32
+-#if !defined(__linux__) && !defined(_ALLBSD_SOURCE)
++#if !defined(__linux__) && !defined(_ALLBSD_SOURCE) && !defined(__amigaos4__)
+ #include <sys/systm.h>
+ #endif /* __linux__ || _ALLBSD_SOURCE */
+ #include <sys/param.h>
 diff --git a/jdk/src/solaris/native/common/jdk_util_md.h b/jdk/src/solaris/native/common/jdk_util_md.h
 index c13bb7794e..d52a811a89 100644
 --- a/jdk/src/solaris/native/common/jdk_util_md.h
