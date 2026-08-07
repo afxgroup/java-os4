@@ -1143,7 +1143,7 @@ index bf88d59..c663143 100644
          MethodBlock *mb = lookupMethod(excep->class, SYMBOL(printStackTrace),
                                                       SYMBOL(___V));
 diff --git a/src/init.c b/src/init.c
-index 32539cf..8798072 100644
+index 32539cf..4f59bcf 100644
 --- a/src/init.c
 +++ b/src/init.c
 @@ -26,7 +26,8 @@
@@ -1156,7 +1156,7 @@ index 32539cf..8798072 100644
  extern void initialisePlatform();
  
  unsigned long clampHeapLimit(long long limit) {
-@@ -34,6 +35,183 @@ unsigned long clampHeapLimit(long long limit) {
+@@ -34,6 +35,175 @@ unsigned long clampHeapLimit(long long limit) {
      return (unsigned long)MIN(clamp, MAX_MAX_HEAP);
  }
  
@@ -1190,7 +1190,6 @@ index 32539cf..8798072 100644
 +extern void classlibSignalThreadExit(void);
 +extern void exitDetachAndDieSelf(void);
 +extern int getThreadsCount(void);
-+extern void realAmigaExit(int error);
 +
 +static void (*amiga_awt_cleanup_fn)(void) = NULL;
 +void registerAmigaAwtCleanup(void (*fn)(void)) {
@@ -1310,16 +1309,9 @@ index 32539cf..8798072 100644
 +                tries, getThreadsCount(), target_threads);
 +
 +    DebugPrintF("[EXIT] amiga_exit: %s (threads left=%d)\n",
-+                main_exit ? "calling exit()" : "delegating final exit to main thread",
-+                getThreadsCount());
++                "calling exit()", getThreadsCount());
 +    if(getThreadsCount() > target_threads)
 +        exitDumpRemainingThreads();
-+
-+    if(!main_exit) {
-+        DebugPrintF("[EXIT] amiga_exit: non-main thread exiting, main will take "
-+                    "the process down at its next poll\n");
-+        pthread_exit(NULL);
-+    }
 +
 +    /* Close any Intuition windows before returning to main().  The atexit
 +       handler registered by libamigaawt is bypassed if anything later calls
@@ -1340,7 +1332,7 @@ index 32539cf..8798072 100644
  /* Setup default values for command line args */
  
  void setDefaultInitArgs(InitArgs *args) {
-@@ -65,9 +243,17 @@ void setDefaultInitArgs(InitArgs *args) {
+@@ -65,9 +235,17 @@ void setDefaultInitArgs(InitArgs *args) {
  
      args->props_count = 0;
  
@@ -1358,7 +1350,7 @@ index 32539cf..8798072 100644
  
  #ifdef INLINING
      args->replication_threshold = 10;
-@@ -89,34 +275,46 @@ int VMInitialising() {
+@@ -89,34 +267,46 @@ int VMInitialising() {
      return VM_initing;
  }
  
