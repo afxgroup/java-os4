@@ -475,8 +475,18 @@ for d in $LJDIRS; do LJINC="$LJINC -I $J/src/$d"; done
 # tz-file detection -- /etc/localtime etc. just don't exist on Amiga so it falls back
 # -- and like MACOSX for getGMTOffsetID, which uses struct tm.tm_gmtoff that clib4 has,
 # instead of the SysV `timezone`/`altzone` globals it lacks).
-EXCL="check_code.c check_format.c jspawnhelper.c java_props_macosx.c"
-mkdir -p "$OUT/libjava"
+# UNIXProcess_md.c and its childproc.c helper are REPLACED, not built: their
+# forkAndExec goes through fork/vfork (no address space to duplicate on
+# AmigaOS) or posix_spawn via a jspawnhelper binary we do not ship.
+# src/openjdk/amiga_process.c provides the same natives on top of clib4's
+# spawnvpe instead, and defines the same symbols -- building both would collide.
+EXCL="check_code.c check_format.c jspawnhelper.c java_props_macosx.c \
+      UNIXProcess_md.c childproc.c"
+# Wipe, do not just create: every .o in here is linked, so a source dropped
+# from the build would otherwise stay in the library for ever.  That is how
+# the excluded UNIXProcess_md.o kept colliding with amiga_process.o, and the
+# same staleness once shipped a libsunec.so built before -static-libstdc++.
+rm -rf "$OUT/libjava"; mkdir -p "$OUT/libjava"
 ok=0; fail=0
 for d in $LJDIRS; do
     for c in "$J/src/$d"/*.c; do
@@ -494,6 +504,18 @@ for d in $LJDIRS; do
         fi
     done
 done
+# java.lang.UNIXProcess natives via spawnvpe, in place of the excluded
+# UNIXProcess_md.c.  Paired with src/niopatch/java/lang/UNIXProcess.java, which
+# adds the AMIGAOS arm to Platform.get() -- without it Runtime.exec throws
+# "AmigaOS is not a supported OS platform" before reaching any native at all.
+if $CC $LJINC -c "$PROJECT_ROOT/src/openjdk/amiga_process.c" \
+       -o "$OUT/libjava/amiga_process.o" 2>"$OUT/e"; then
+    ok=$((ok+1)); echo "  amiga_process.c OK"
+else
+    fail=$((fail+1)); echo "  amiga_process.c FAIL"
+    grep -m3 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
+fi
+
 echo "  libjava compile: $ok OK, $fail FAILED"
 
 # java.lang.Shutdown.beforeHalt(): some 8u drops already provide it; only synthesize
@@ -543,7 +565,7 @@ if [ -f "$ZF" ] && grep -q "jbyteArray name, jboolean addSlash)" "$ZF"; then
 fi
 ZINC="-I $HDR -I $ZIP -I $ZLIB $EXP -I $J/src/solaris/native/common \
  -I $J/src/share/native/java/io -I $J/src/solaris/native/java/io -include $COMPAT/jdkdefs.h"
-mkdir -p "$OUT/libzip"
+rm -rf "$OUT/libzip"; mkdir -p "$OUT/libzip"
 zok=0; zfail=0
 for c in "$ZLIB"/*.c "$ZIP"/Adler32.c "$ZIP"/CRC32.c "$ZIP"/Deflater.c \
          "$ZIP"/Inflater.c "$ZIP"/zip_util.c "$ZIP"/ZipFile.c; do
@@ -602,9 +624,11 @@ NIOP="$PROJECT_ROOT/src/niopatch"
 if [ -f "$NIOP/sun/nio/fs/DefaultFileSystemProvider.java" ]; then
     (cd "$NIOP" \
     && "$BOOT_JDK/bin/javac" -source 8 -target 8 \
-        sun/nio/fs/DefaultFileSystemProvider.java java/io/UnixFileSystem.java 2>/dev/null \
+        sun/nio/fs/DefaultFileSystemProvider.java java/io/UnixFileSystem.java \
+        java/lang/UNIXProcess.java 2>/dev/null \
     && "$BOOT_JDK/bin/jar" cf "$OUT/niopatch.zip" \
-        sun/nio/fs/DefaultFileSystemProvider.class java/io/UnixFileSystem.class) \
+        sun/nio/fs/DefaultFileSystemProvider.class java/io/UnixFileSystem.class \
+        java/lang/UNIXProcess*.class) \
     && echo "  niopatch.zip OK ($(wc -c < "$OUT/niopatch.zip") bytes)" \
     || echo "  niopatch.zip FAIL"
 fi
@@ -729,7 +753,7 @@ NIOINC="-I $HDR $EXP -I $J/src/share/native/common -I $J/src/solaris/native/comm
  -I $J/src/share/native/sun/nio/ch -I $J/src/share/native/java/io \
  -I $J/src/share/native/java/net -I $J/src/solaris/native/java/net \
  -I $J/src/solaris/native/java/io -include $COMPAT/jdkdefs.h"
-mkdir -p "$OUT/libnio"
+rm -rf "$OUT/libnio"; mkdir -p "$OUT/libnio"
 nok=0; nfail=0
 for c in "$NFS/UnixNativeDispatcher.c" "$NFS/UnixCopyFile.c" "$NFS/LinuxNativeDispatcher.c" \
          "$NCH/FileChannelImpl.c" "$NCH/FileDispatcherImpl.c" "$NCH/FileKey.c" \
@@ -925,7 +949,7 @@ done
 NETINC="-I $HDR $EXP -I $J/src/share/native/common -I $J/src/solaris/native/common \
  -I $J/src/share/native/java/net -I $J/src/solaris/native/java/net \
  -I $J/src/solaris/native/java/io"
-mkdir -p "$OUT/libnet"
+rm -rf "$OUT/libnet"; mkdir -p "$OUT/libnet"
 netok=0; netfail=0
 for f in $NETSRC_SOL; do
     if $CC -D_GNU_SOURCE -DDONT_ENABLE_IPV6 $NETINC \
@@ -1024,7 +1048,7 @@ if [ -d "$EC" ]; then
     # force-include here: SunEC touches no files, so it needs no amiga_path.
     ECINC="-I $HDR $EXP -I $J/src/share/native/common -I $EC -I $EC/impl"
     ECDEFS="-DMP_API_COMPATIBLE -DNSS_ECC_MORE_THAN_SUITE_B"
-    mkdir -p "$OUT/libsunec"
+    rm -rf "$OUT/libsunec"; mkdir -p "$OUT/libsunec"
     ecok=0; ecfail=0
     for f in "$EC"/impl/*.c; do
         if $CC $ECDEFS $ECINC -c "$f" -o "$OUT/libsunec/$(basename "${f%.c}").o" 2>"$OUT/e"; then
