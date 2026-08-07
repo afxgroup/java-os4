@@ -51,7 +51,7 @@ echo "  V9Bomb.class major byte = $(od -An -tu1 -j7 -N1 "$TC/classes/V9Bomb.clas
 echo "testsuite.zip OK ($(wc -c < "$B/testsuite.zip") bytes)"
 
 echo "=== compiling examples ==="
-for app in HelloJava SwingDemo NetTest NetDownload ExecTest; do
+for app in HelloJava SwingDemo NetTest NetDownload ExecTest ExecLeak; do
     rm -rf "$TC/ex-$app"; mkdir -p "$TC/ex-$app"
     "$JAVAC" -source 8 -target 8 -encoding UTF-8 -bootclasspath "$RT" \
         -d "$TC/ex-$app" "$PROJECT_ROOT/examples/$app.java"

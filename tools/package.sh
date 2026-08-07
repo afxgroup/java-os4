@@ -159,7 +159,7 @@ mkdir -p "$RT/classes"
 mkdir -p "$RT/examples"
 cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar \
    "$B/examples/"NetTest.jar "$B/examples/"NetDownload.jar \
-   "$B/examples/"ExecTest.jar "$RT/examples/"
+   "$B/examples/"ExecTest.jar "$B/examples/"ExecLeak.jar "$RT/examples/"
 [ -f "$B/examples/"awttest.jar ] && cp "$B/examples/"awttest.jar "$RT/examples/"
 cp "$B/testsuite.zip" "$RT/examples/"
 
