@@ -475,6 +475,38 @@ for d in $LJDIRS; do LJINC="$LJINC -I $J/src/$d"; done
 # tz-file detection -- /etc/localtime etc. just don't exist on Amiga so it falls back
 # -- and like MACOSX for getGMTOffsetID, which uses struct tm.tm_gmtoff that clib4 has,
 # instead of the SysV `timezone`/`altzone` globals it lacks).
+# handleAvailable(): stop available() lying about pipes.
+#
+# clib4 pipes are DOS handles on PIPE:, which fstat reports as S_IFIFO, so the
+# function tries ioctl(FIONREAD) -- clib4 implements no such request -- and then
+# falls through to lseek arithmetic that is meaningless on a pipe.  It answered
+# with a positive count that never decreased, which is what grew UNIXProcess's
+# reaper buffer until the heap ran out.  0 is a legal answer: available()
+# promises only that this many bytes read without blocking, never that no more
+# exist.  Placed after the ioctl attempt, so a clib4 that grows FIONREAD wins.
+IOUTIL="$J/src/solaris/native/java/io/io_util_md.c"
+if [ -f "$IOUTIL" ] && ! grep -q "AMIGA_NO_FIONREAD" "$IOUTIL"; then
+    awk '
+        /RESTARTABLE\(ioctl\(fd, FIONREAD, &n\), result\);/ { hit = 1 }
+        { print }
+        hit && /^            \}$/ && !done {
+            print "#ifdef __amigaos4__ /* AMIGA_NO_FIONREAD */"
+            print "            /* clib4 has no FIONREAD, and the lseek fallback below is"
+            print "               meaningless on a PIPE: handle -- it answered with a count"
+            print "               that never decreased.  Say 0 rather than something untrue. */"
+            print "            *pbytes = 0;"
+            print "            return 1;"
+            print "#endif"
+            done = 1; hit = 0
+        }
+    ' "$IOUTIL" > "$IOUTIL.tmp" && mv "$IOUTIL.tmp" "$IOUTIL"
+    if grep -q "AMIGA_NO_FIONREAD" "$IOUTIL"; then
+        echo "=== adapted io_util_md.c (amigaos: available()=0 on pipes, no FIONREAD) ==="
+    else
+        echo "  WARN: handleAvailable not adapted; available() may still lie about pipes"
+    fi
+fi
+
 # UNIXProcess_md.c and its childproc.c helper are REPLACED, not built: their
 # forkAndExec goes through fork/vfork (no address space to duplicate on
 # AmigaOS) or posix_spawn via a jspawnhelper binary we do not ship.

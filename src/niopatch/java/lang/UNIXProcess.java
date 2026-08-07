@@ -591,16 +591,46 @@ final class UNIXProcess extends Process {
         ProcessPipeInputStream(int fd) {
             super(new FileInputStream(newFileDescriptor(fd)));
         }
+        /*
+         * Reads to EOF instead of trusting available().
+         *
+         * The stock loop was
+         *
+         *     while ((j = in.available()) > 0) {
+         *         a = (a == null) ? new byte[j] : Arrays.copyOf(a, n + j);
+         *         n += in.read(a, n, j);
+         *     }
+         *
+         * and it does not survive an available() that lies.  clib4's pipes are
+         * DOS handles on PIPE:, reported as S_IFIFO, so handleAvailable() tries
+         * ioctl(FIONREAD) -- which clib4 does not implement -- and falls
+         * through to lseek arithmetic that means nothing on a pipe.  It came
+         * back positive and never decreased, so the buffer grew once per
+         * iteration until "OutOfMemoryError: Java heap space" in the process
+         * reaper.  Note the stock loop also adds a read() result without
+         * checking it, so an EOF (-1) walks n backwards.
+         *
+         * Reading to EOF is safe HERE in particular, and would not be in
+         * general: this runs only after the child has exited, and forkAndExec
+         * closed the parent's copy of the write end, so nothing holds that end
+         * open and read() reports EOF as soon as the buffer empties.  The wait
+         * is bounded by the pipe buffer, not by the child.
+         *
+         * Returning null when nothing was buffered matters: the caller reads it
+         * as "no stragglers" and installs NullInputStream, whereas an empty
+         * array would be a stream that is open but eternally empty.
+         */
         private static byte[] drainInputStream(InputStream in)
                 throws IOException {
-            int n = 0;
-            int j;
-            byte[] a = null;
-            while ((j = in.available()) > 0) {
-                a = (a == null) ? new byte[j] : Arrays.copyOf(a, n + j);
-                n += in.read(a, n, j);
+            java.io.ByteArrayOutputStream collected =
+                new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int r;
+
+            while ((r = in.read(buf)) > 0) {
+                collected.write(buf, 0, r);
             }
-            return (a == null || n == a.length) ? a : Arrays.copyOf(a, n);
+            return collected.size() == 0 ? null : collected.toByteArray();
         }
 
         /** Called by the process reaper thread when the process exits. */
