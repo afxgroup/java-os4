@@ -878,10 +878,110 @@ index 71fc8aa..0ee57ac 100644
          } while(sig == NSIG);
  
 diff --git a/src/config.h b/src/config.h
-index dd2b875..08dffc6 100644
+index dd2b875..4a32246 100644
 --- a/src/config.h
 +++ b/src/config.h
-@@ -186,7 +186,12 @@
+@@ -27,8 +27,7 @@
+ /* Define to 1 if using `alloca.c'. */
+ /* #undef C_ALLOCA */
+ 
+-/* interpreter direct */
+-/* #undef DIRECT */
++/* interpreter direct -- see the engine block near THREADED below */
+ /* Define to 1 if you have `alloca', as a function or macro. */
+ //#define HAVE_ALLOCA 1
+ 
+@@ -115,8 +114,7 @@
+ /* Define to 1 if you have the <unistd.h> header file. */
+ #define HAVE_UNISTD_H 1
+ 
+-/* interpreter inlining */
+-/* #undef INLINING */
++/* interpreter inlining -- see the engine block near THREADED below */
+ 
+ /* Installation directory (prefix) */
+ #define INSTALL_DIR "JAmiga:jvm"
+@@ -140,12 +138,12 @@
+ /* Define to the version of this package. */
+ #define PACKAGE_VERSION ""
+ 
+-/* interpreter uses prefetching */
+-/* #undef PREFETCH */
++/* interpreter uses prefetching -- see the engine block near THREADED below */
+ 
+-/* compute relocatability at runtime */
+-#undef RUNTIME_RELOC_CHECKS
+-/*#define RUNTIME_RELOC_CHECKS */
++/* Compute the relocatability of each handler at runtime rather than at build
++   time.  Upstream defaults this to on when cross-compiling, which we always
++   are: the build machine cannot run the ppc handlers to measure them. */
++#define RUNTIME_RELOC_CHECKS 1
+ 
+ /* If using the C implementation of alloca, define if you know the
+    direction of stack growth for your system; otherwise it will be
+@@ -158,17 +156,50 @@
+ /* Define to 1 if you have the ANSI C header files. */
+ #define STDC_HEADERS 1
+ 
+-/* interpreter threaded */
+-#undef THREADED
+-/* comment these, and we're back to normal (change makefiles also*/
+-/*
+-*/
+-
+-// Something's wrong wioht the INLINING
+-//#define INLINING
+-#undef INLINING
+-/*#define THREADED*/
+-#undef DIRECT
++/* Interpreter engine selection -- JAMVM_ENGINE_LEVEL, set by tools/build-jamvm-*.sh
++ * from the JAMVM_ENGINE environment variable so the level can be changed without
++ * editing this file:
++ *
++ *   0 switch    plain switch dispatch.  What this port used to build, and the
++ *               slowest thing JamVM can do.
++ *   1 threaded  computed-goto dispatch + stack caching (top of the operand
++ *               stack kept in registers)
++ *   2 direct    + bytecode rewritten to handler addresses on first execution,
++ *               so dispatch costs no decode, + prefetching (which upstream
++ *               enables only on powerpc)
++ *   3 inline    + the code-copying engine: it copies the handlers' own machine
++ *               code into a per-block buffer, so dispatch disappears entirely
++ *               inside a basic block.  This is as close to a JIT as JamVM has.
++ *               PowerPC supports it: arch/powerpc.h implements the two things
++ *               it needs, FLUSH_CACHE (icache sync after copying code) and
++ *               GEN_REL_JMP (the relative branch it patches in).
++ *
++ * Level 3 is what upstream's configure enables by default for powerpc, and it
++ * is the default here.  If a level misbehaves on real hardware, drop one:
++ *
++ *     JAMVM_ENGINE=2 make -f Makefile.local vm
++ *
++ * Level 3 also needs -fno-reorder-blocks on the interpreter translation units
++ * (the build scripts add it) so gcc keeps each handler body contiguous and does
++ * not splice shared tails between them.
++ */
++#ifndef JAMVM_ENGINE_LEVEL
++#define JAMVM_ENGINE_LEVEL 3
++#endif
++
++#if JAMVM_ENGINE_LEVEL >= 1
++#define THREADED 1
++#define USE_CACHE 1
++#endif
++
++#if JAMVM_ENGINE_LEVEL >= 2
++#define DIRECT 1
++#define PREFETCH 1
++#endif
++
++#if JAMVM_ENGINE_LEVEL >= 3
++#define INLINING 1
++#endif
+ 
+ /* Define to 1 if you can safely include both <sys/time.h> and <time.h>. */
+ #define TIME_WITH_SYS_TIME 1
+@@ -186,7 +217,12 @@
  #undef TRACEDLL
  
  /* defined if object finalisation tracing enabled for debugging */
@@ -895,6 +995,16 @@ index dd2b875..08dffc6 100644
  
  /* defined if gc tracing enabled for debugging */
  //#define TRACEGC 0
+@@ -200,8 +236,7 @@
+ /* defined if thread creation tracing enabled for debugging */
+ #undef TRACETHREAD
+ 
+-/* interpreter uses caching */
+-/* #undef USE_CACHE */
++/* interpreter uses caching -- see the engine block near THREADED below */
+ 
+ /* use FFI */
+ /* #undef USE_FFI */
 diff --git a/src/dll.c b/src/dll.c
 index 3604fcf..654c63c 100644
 --- a/src/dll.c

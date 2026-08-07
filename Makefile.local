@@ -7,6 +7,8 @@
 #   make -f Makefile.local vendor        fetch the vendored JamVM + IcedTea 8 upstream sources (once)
 #   make -f Makefile.local clib4         no-op: use the installed SDK clib4
 #   make -f Makefile.local vm            build the VM (libjvm.so + jamvm-openjdk launcher)
+#     JAMVM_ENGINE=0..3 selects the interpreter engine (default 3 = inline-threaded;
+#     0 switch, 1 threaded, 2 direct).  See docs/ppc32-performance.md
 #   make -f Makefile.local natives       build the OpenJDK 8 + AWT native libraries
 #   make -f Makefile.local toolkit       build the sun.awt.amiga toolkit + test zips
 #   make -f Makefile.local tests         build the VM test suite + bundled examples

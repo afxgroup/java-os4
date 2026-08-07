@@ -60,7 +60,11 @@ INC="-I . -I $PROJECT_ROOT/src/jamvm -I $PROJECT_ROOT/src/openjdk -I os/amiga -I
 # VERSION_* are JamVM's version (2.0.1), normally from config.h; the openjdk
 # classlib's jvm.c (JVM_GetVersionInfo) needs them (gnuclasspath has no jvm.c).
 # -fPIC: the VM objects go into the shared libjvm.so (see linking section).
-CFLAGS="-mcrt=clib4 -O0 -W -Wall -fPIC -D__USE_INLINE__ -DUSE_ZIP \
+# Interpreter engine level (see src/config.h): 0 switch, 1 threaded, 2 direct,
+# 3 inline-threaded (the code-copying engine).  3 is upstream's powerpc default.
+JAMVM_ENGINE=${JAMVM_ENGINE:-3}
+CFLAGS="-mcrt=clib4 -O2 -W -Wall -fPIC -D__USE_INLINE__ -DUSE_ZIP \
+ -DJAMVM_ENGINE_LEVEL=$JAMVM_ENGINE \
  -DOPENJDK_VERSION=8 -DJSR292 -DJSR308 -DJSR335 -DJSR901 \
  -DVERSION_MAJOR=2 -DVERSION_MINOR=0 -DVERSION_MICRO=1 \
  -fcommon -fgnu89-inline -gstabs $INC"
@@ -70,6 +74,7 @@ OBJS=""        # libcore objects -> libjvm.so
 JAMO=""        # jam.c (main) -> the launcher, links against libjvm.so
 compile() { ppc-amigaos-gcc $CFLAGS -c "$1" -o "$OUT/$2.o"; OBJS="$OBJS $OUT/$2.o"; }
 
+echo "=== engine level $JAMVM_ENGINE (0 switch, 1 threaded, 2 direct, 3 inline) ==="
 echo "=== core (all src/*.c except dll_ffi.c; jam.c -> launcher) ==="
 for f in *.c; do
     case "$f" in
@@ -79,12 +84,20 @@ for f in *.c; do
     compile "$f" "$(basename "$f" .c)"
 done
 
+# -fno-reorder-blocks is REQUIRED by the inlining (code-copying) engine, and is
+# exactly what upstream's configure adds for it: the engine copies each handler's
+# machine code out of interp.c into a per-block buffer, so gcc must not move the
+# handler bodies apart or splice shared tails between them.  Applies to the
+# interpreter translation units only.
+INTERP_CFLAGS="-fno-reorder-blocks"
+icompile() { ppc-amigaos-gcc $CFLAGS $INTERP_CFLAGS -c "$1" -o "$OUT/$2.o"; OBJS="$OBJS $OUT/$2.o"; }
+
 echo "=== interpreter ==="
 compile interp/direct.c                i_direct
 compile interp/inlining.c              i_inlining
-compile interp/engine/interp.c         e_interp
-compile interp/engine/interp2.c        e_interp2
-compile interp/engine/relocatability.c e_reloc
+icompile interp/engine/interp.c         e_interp
+icompile interp/engine/interp2.c        e_interp2
+icompile interp/engine/relocatability.c e_reloc
 
 echo "=== classlib (openjdk) ==="
 for f in thread class natives excep reflect dll jni jvm properties management \
