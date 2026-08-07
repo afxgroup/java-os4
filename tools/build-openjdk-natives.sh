@@ -657,10 +657,10 @@ if [ -f "$NIOP/sun/nio/fs/DefaultFileSystemProvider.java" ]; then
     (cd "$NIOP" \
     && "$BOOT_JDK/bin/javac" -source 8 -target 8 \
         sun/nio/fs/DefaultFileSystemProvider.java java/io/UnixFileSystem.java \
-        java/lang/UNIXProcess.java 2>/dev/null \
+        java/lang/UNIXProcess.java java/lang/AmigaDiag.java 2>/dev/null \
     && "$BOOT_JDK/bin/jar" cf "$OUT/niopatch.zip" \
         sun/nio/fs/DefaultFileSystemProvider.class java/io/UnixFileSystem.class \
-        java/lang/UNIXProcess*.class) \
+        java/lang/UNIXProcess*.class java/lang/AmigaDiag.class) \
     && echo "  niopatch.zip OK ($(wc -c < "$OUT/niopatch.zip") bytes)" \
     || echo "  niopatch.zip FAIL"
 fi

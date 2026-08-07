@@ -99,6 +99,39 @@ static void closeSafe(int fd) {
     }
 }
 
+/* ---- diagnostics ----------------------------------------------------- */
+
+/*
+ * java.lang.AmigaDiag.openFdCount() -- how many descriptors this process holds.
+ *
+ * PIPE: has no directory to list, so a leak of pipe handles cannot be counted
+ * from the shell.  This counts what CAN be counted, and it happens to be the
+ * discriminating half: the ends the parent keeps are in this table, the ends
+ * handed to a child are not, because spawnvpe duplicates those and the child
+ * owns them from then on.  A delta of six per exec here means we are not
+ * closing what forkAndExec returned; a delta of zero means the leak is on the
+ * child's side and belongs to clib4.
+ *
+ * fcntl(F_GETFD) rather than anything clib4-internal, so this keeps working if
+ * the descriptor table is ever reorganised.
+ */
+JNIEXPORT jint JNICALL
+Java_java_lang_AmigaDiag_openFdCount(JNIEnv *env, jclass clazz) {
+    int i, count = 0;
+
+    (void)env;
+    (void)clazz;
+
+    /* Well past anything this runtime opens; the scan is cheap and only runs
+       when a test asks for it. */
+    for (i = 0; i < 1024; i++) {
+        if (fcntl(i, F_GETFD) >= 0) {
+            count++;
+        }
+    }
+    return (jint)count;
+}
+
 /* ---- natives -------------------------------------------------------- */
 
 /*

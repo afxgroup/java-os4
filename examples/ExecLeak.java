@@ -10,24 +10,27 @@
  *
  *     java -cp examples/ExecLeak.jar ExecLeak [count]
  *
- * At each pause, from ANOTHER shell:
+ * PIPE: cannot be listed -- it is a read/write device with no directory -- so
+ * the shell has no way to count pipe handles.  What this CAN count by itself is
+ * its own open descriptors, and that is the discriminating half: the ends the
+ * parent keeps are ours, the ends handed to a child are not, since spawnvpe
+ * duplicates those and the child owns them afterwards.
  *
- *     List PIPE:
- *
- * and note how many entries there are.  The count must be taken while this
- * program is still running -- when it exits the handles go with the process and
- * there is nothing left to see.
+ * So read the "open fds" line this prints, and if you have a process monitor
+ * (Scout, SysMon) look at the PIPE: handler alongside it.  The pauses are there
+ * so both can be read while the JVM is still alive -- once it exits everything
+ * goes with the process.
  *
  * Reading the answer, with D = (after - before):
  *
  *     D == 0            one exec leaks nothing; something specific to one of
  *                       ExecTest's ten cases is responsible, and running them
  *                       one at a time will name it.
- *     D == 3 * count    the child's ends.  spawnvpe DupFileHandle()s three
- *                       handles per child and expects SystemTags with
+ *     open fds +6/exec  the parent's ends: UNIXProcess is not closing what
+ *                       forkAndExec handed it, and that is ours to fix.
+ *     open fds flat,    the child's ends.  spawnvpe DupFileHandle()s three
+ *     handlers grow     handles per child and expects SystemTags with
  *                       SYS_Asynch to close them; that would be the clib4 side.
- *     D == 6 * count    the parent's ends as well, so UNIXProcess is not
- *                       closing what forkAndExec handed it -- our side.
  *
  * Run it twice, with 1 and with 3, to confirm the delta scales per exec rather
  * than being a fixed cost paid once.
@@ -56,7 +59,7 @@ public class ExecLeak {
                            + System.getProperty("os.name"));
         System.out.println();
 
-        pause("BEFORE: run \"List PIPE:\" in another shell and note the count");
+        pause("BEFORE");
 
         int ok = 0;
         for (int i = 0; i < count; i++) {
@@ -79,7 +82,7 @@ public class ExecLeak {
            moment before counting or the answer is a race. */
         Thread.sleep(1000);
 
-        pause("AFTER: run \"List PIPE:\" again -- the difference is the answer");
+        pause("AFTER " + count + " exec(s) -- the difference is the answer");
 
         /* Only now, in case anything is waiting on a finaliser rather than on
            an explicit close.  If the count drops here, the handles were not
@@ -87,8 +90,7 @@ public class ExecLeak {
         System.gc();
         Thread.sleep(1000);
 
-        pause("AFTER GC: if the count fell here, they were released late, "
-              + "not leaked");
+        pause("AFTER GC -- a count that falls here was released late, not leaked");
 
         System.out.println();
         System.out.println("done -- the handles go away with this process now");
@@ -149,7 +151,7 @@ public class ExecLeak {
      */
     private static void pause(String what) throws Exception {
         System.out.println();
-        System.out.println(">>> " + what);
+        System.out.println(">>> " + what + "  |  open fds: " + openFds());
         System.out.print(">>> press Enter to continue... ");
         System.out.flush();
 
@@ -164,6 +166,21 @@ public class ExecLeak {
                 c = System.in.read();
             }
             System.out.println();
+        }
+    }
+
+    /*
+     * Reflection so the same jar still runs on a host JDK, which has no
+     * AmigaDiag.  A test that only works where the bug is cannot be checked
+     * against a platform where the answer is known.
+     */
+    private static String openFds() {
+        try {
+            Class<?> diag = Class.forName("java.lang.AmigaDiag");
+            Object n = diag.getMethod("openFdCount").invoke(null);
+            return String.valueOf(n);
+        } catch (Throwable t) {
+            return "n/a (not this runtime)";
         }
     }
 
