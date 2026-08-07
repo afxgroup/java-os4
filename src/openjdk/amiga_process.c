@@ -42,6 +42,9 @@
 #include "jni.h"
 #include "jni_util.h"
 
+/* The port's single source of truth for Java path -> AmigaDOS path. */
+#include "amiga_path.h"
+
 /*
  * Returned by waitForProcessExit0 when the child is still running.  No AmigaDOS
  * return code can collide with it: RC is a small non-negative number (OK 0,
@@ -198,7 +201,23 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
         childErr = fds[2];
     }
 
-    resultPid = (jint)spawnvpe(pprog, argv, (char **)envv, pdir,
+    /*
+     * amiga_path() on the two arguments that ARE paths, and only those.
+     *
+     * clib4 will not do it: __translate_unix_to_amiga_path_name() accepts any
+     * name containing a ':' "as is", so a Java-side absolute path -- which on
+     * this port looks like "/Work:Tools/prog" or "/T:" -- reaches Lock()
+     * verbatim, and AmigaDOS reads the leading '/' as the PARENT of the volume.
+     * That is the requester for "/T:" instead of "T:".
+     *
+     * argv is deliberately left alone.  Which arguments are paths is the
+     * child's business, not ours; execv does not translate them either.
+     *
+     * Two live translations at once is within the buffer ring (4), and holding
+     * both is exactly what it exists for.
+     */
+    resultPid = (jint)spawnvpe(amiga_path(pprog), argv, (char **)envv,
+                               pdir != NULL ? amiga_path(pdir) : NULL,
                                childIn, childOut, childErr);
 
     if (resultPid < 0) {

@@ -49,6 +49,11 @@ public class ExecTest {
         System.out.println("ExecTest -- Runtime.exec on "
                            + System.getProperty("os.name") + " "
                            + System.getProperty("os.version"));
+        /* Printed because it is a path, and paths are where this port bites.
+           A value like "/T:" is the Java-side spelling and must reach DOS as
+           "T:" -- clib4 will not convert it, since its translator passes
+           anything containing ':' through untouched. */
+        System.out.println("tmpdir: " + System.getProperty("java.io.tmpdir"));
         System.out.println();
 
         canLaunch();
