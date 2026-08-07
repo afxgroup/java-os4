@@ -1,7 +1,8 @@
 #!/bin/sh
 # Phase 5: assemble the Java-OS4 release -- an Installation Utility package.
 #
-# Runs in the javaos4-build container (has /opt/jdk8, the DejaVu fonts, and lha).
+# Runs in the javaos4-build container (has /opt/jdk8 and lha); the runtime fonts
+# come from the repo (src/fontconfig/fonts), not from the host.
 # Needs only the repo mounted at /work, with build/ already populated by the
 # build scripts (it gathers their outputs -- it does not compile anything).
 #
@@ -61,7 +62,7 @@ cp "$B/libjvm.so"     "$RT/"
 } > "$RT/java"
 
 # --- runtime: OpenJDK + AWT natives ---------------------------------------
-for so in libjava libverify libzip libnio libnet \
+for so in libjava libverify libzip libnio libnet libsunec \
           libawt libfontmanager libamigaawt liblcms; do
     cp "$N/$so.so" "$RT/"
 done
@@ -115,6 +116,34 @@ cp "$JDK8/jre/lib/rt.jar" "$JDK8/jre/lib/charsets.jar" "$JDK8/jre/lib/jce.jar" \
 cp "$N/niopatch.zip"     "$RT/"
 cp "$B/amigatoolkit.zip" "$RT/"
 
+# --- runtime: lib/ext (the extension class loader's jars) ------------------
+# We shipped no lib/ext at all, and jce.jar is only the javax.crypto API: every
+# actual cipher lives in com.sun.crypto.provider, which ships ONLY in
+# lib/ext/sunjce_provider.jar.  java.security still lists SunJCE as
+# security.provider.5, so the provider was silently skipped and any
+# Cipher.getInstance("DES") died with "Cannot find any provider supporting DES".
+# classlibDefaultExtDirs() already resolves java.ext.dirs to <java.home>/lib/ext
+# (see the JamVM patch), so dropping the jars in is enough.
+#
+# sunec.jar carries the SunEC provider, whose class initialiser does
+# System.loadLibrary("sunec") -- so it is only shippable now that we build
+# libsunec.so.  It is not optional: without EC the runtime offers no curve a
+# modern TLS server will take, and every https:// call dies with
+# "handshake_failure".
+#
+# Deliberately NOT shipped: sunpkcs11.jar needs libj2pkcs11.so (and PKCS11
+# hardware) we do not build, so shipping it would trade a missing provider for
+# a failing one; nashorn.jar (1.9M) and cldrdata.jar (3.7M)
+# are big and unused by default on 8 (java.locale.providers is JRE,SPI, which
+# reads localedata.jar); jaccess.jar is the Windows accessibility bridge.
+# meta-index is skipped on purpose too -- it is a load-time optimisation that
+# describes a lib/ext we do not reproduce.
+mkdir -p "$RT/lib/ext"
+for j in sunjce_provider.jar sunec.jar localedata.jar zipfs.jar dnsns.jar; do
+    cp "$JDK8/jre/lib/ext/$j" "$RT/lib/ext/" 2>/dev/null || \
+        echo "  WARN: missing $JDK8/jre/lib/ext/$j"
+done
+
 # JamVM -jar dispatch path requires jamvm.java.lang.JarLauncher to be available
 # on the boot class path.  In OpenJDK mode JamVM includes java.home/classes by
 # default, so compile and ship the class there.
@@ -128,14 +157,26 @@ mkdir -p "$RT/classes"
 # 0.5.0 shipped nothing to run but `java -version`; bundle a headless demo, a
 # Swing demo, and the self-verifying VM test suite.
 mkdir -p "$RT/examples"
-cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar "$RT/examples/"
+cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar \
+   "$B/examples/"NetTest.jar "$B/examples/"NetDownload.jar "$RT/examples/"
 [ -f "$B/examples/"awttest.jar ] && cp "$B/examples/"awttest.jar "$RT/examples/"
 cp "$B/testsuite.zip" "$RT/examples/"
 
 # --- runtime: lib/ resources (read from java.home/lib) --------------------
+# lib/fonts must hold the JRE's own Lucida set, under the JRE's file names:
+# sun.font.FontUtilities derives isOpenJDK from whether LucidaSansRegular.ttf
+# exists there, and when it is missing SunFontManager.getDefaultFontFile()
+# stays null -- which is the file every logical font is composed from in
+# FontConfiguration.get2DCompositeFontInfo().  The DejaVu fonts we used to pull
+# off the build host therefore left the runtime with no usable font at all.
+# The fonts are vendored in-repo (src/fontconfig/fonts), so this no longer
+# depends on what the build host happens to have installed.
 cp "$PROJECT_ROOT/src/fontconfig/fontconfig.properties" "$RT/lib/"
-cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
-   /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf "$RT/lib/fonts/"
+for f in LucidaSansRegular.ttf LucidaSansDemiBold.ttf LucidaSansOblique.ttf \
+         LucidaSansDemiOblique.ttf LucidaTypewriterRegular.ttf \
+         LucidaTypewriterBold.ttf; do
+    cp "$PROJECT_ROOT/src/fontconfig/fonts/$f" "$RT/lib/fonts/"
+done
 for p in currency.data tzdb.dat calendars.properties content-types.properties \
          flavormap.properties hijrah-config-umalqura.properties \
          logging.properties net.properties psfontj2d.properties \
