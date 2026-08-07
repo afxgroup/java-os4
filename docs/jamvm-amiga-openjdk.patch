@@ -1396,7 +1396,7 @@ index 6a9f7c0..6380ae7 100644
  #endif /* THREADED */
  
 diff --git a/src/jam.c b/src/jam.c
-index 052f84a..0d4c196 100644
+index 052f84a..607f16c 100644
 --- a/src/jam.c
 +++ b/src/jam.c
 @@ -32,10 +32,19 @@
@@ -1487,7 +1487,7 @@ index 052f84a..0d4c196 100644
                  /* Compatibility options */
                  } else if(strcmp(argv[i], "-client") == 0 ||
                            strcmp(argv[i], "-server") == 0) {
-@@ -251,10 +286,26 @@ int main(int argc, char *argv[]) {
+@@ -251,10 +286,40 @@ int main(int argc, char *argv[]) {
          exit(1);
      }
  
@@ -1502,9 +1502,23 @@ index 052f84a..0d4c196 100644
 +       a -classpath entry (URLClassPath) still fails -- Amiga "volume:" path -> URL
 +       (Phase 3 TODO); -Xbootclasspath is the working path meanwhile. */
 +    system_loader = getSystemClassLoader();
-+    if(system_loader == NULL)
-+        clearException();
-+    else
++    if(system_loader == NULL) {
++        /* Keep the fallback -- classes on -Xbootclasspath still load through the
++           bootstrap loader -- but do NOT swallow the reason, as this used to.
++           Without the system loader the -classpath is not searched at all, so
++           the main-class lookup below fails and reports "NoClassDefFoundError:
++           <your class>", sending you after a classpath bug that does not exist.
++           The -jar path disguises it further: JarLauncher lives on the boot
++           class path, so it loads anyway and the run only breaks later, which
++           makes -cp look broken and -jar look fine.  (Seen for real: a 16MB
++           non-growable heap made sun.misc.Launcher's initialiser throw
++           OutOfMemoryError, and every symptom pointed somewhere else.) */
++        jam_fprintf(stderr, "Warning: the system class loader failed to "
++                            "initialise, so -classpath will NOT be searched "
++                            "and only -Xbootclasspath classes can load.  "
++                            "The underlying error was:\n");
++        printException();
++    } else
 +        mainThreadSetContextClassLoader(system_loader);
 +#else
 +    if((system_loader = getSystemClassLoader()) == NULL)
@@ -1515,7 +1529,7 @@ index 052f84a..0d4c196 100644
  
      for(cpntr = argv[class_arg]; *cpntr; cpntr++)
          if(*cpntr == '.')
-@@ -301,6 +352,5 @@ error:
+@@ -301,6 +366,5 @@ error:
      mainThreadWaitToExitVM();
      exitVM(status);
  
