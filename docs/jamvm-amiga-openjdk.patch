@@ -942,7 +942,7 @@ index 71fc8aa..0ee57ac 100644
          } while(sig == NSIG);
  
 diff --git a/src/config.h b/src/config.h
-index dd2b875..4a32246 100644
+index dd2b875..a001b80 100644
 --- a/src/config.h
 +++ b/src/config.h
 @@ -27,8 +27,7 @@
@@ -983,7 +983,7 @@ index dd2b875..4a32246 100644
  
  /* If using the C implementation of alloca, define if you know the
     direction of stack growth for your system; otherwise it will be
-@@ -158,17 +156,50 @@
+@@ -158,17 +156,59 @@
  /* Define to 1 if you have the ANSI C header files. */
  #define STDC_HEADERS 1
  
@@ -1016,17 +1016,26 @@ index dd2b875..4a32246 100644
 + *               it needs, FLUSH_CACHE (icache sync after copying code) and
 + *               GEN_REL_JMP (the relative branch it patches in).
 + *
-+ * Level 3 is what upstream's configure enables by default for powerpc, and it
-+ * is the default here.  If a level misbehaves on real hardware, drop one:
++ * Upstream enables level 3 by default for powerpc.  We default to 2, because
++ * level 3 has been observed on AmigaOS 4 to compute WRONG ANSWERS -- see
++ * docs/ppc32-performance.md.  It is intermittent (inlining is profile-driven,
++ * so a block is only copied once it has run often enough) and it corrupts
++ * floating point rather than crashing: ConcurrentHashMap's constructor computed
++ * a capacity of 2^30 out of `(long)(1.0 + initialCapacity / loadFactor)` and
++ * every run died differently.  Silent wrong arithmetic is not something to ship
++ * as a default.
 + *
-+ *     JAMVM_ENGINE=2 make -f Makefile.local vm
++ * Level 2 keeps everything except the code copying, which is where the risk is.
++ * To experiment with 3:
++ *
++ *     JAMVM_ENGINE=3 make -f Makefile.local vm
 + *
 + * Level 3 also needs -fno-reorder-blocks on the interpreter translation units
 + * (the build scripts add it) so gcc keeps each handler body contiguous and does
 + * not splice shared tails between them.
 + */
 +#ifndef JAMVM_ENGINE_LEVEL
-+#define JAMVM_ENGINE_LEVEL 3
++#define JAMVM_ENGINE_LEVEL 2
 +#endif
 +
 +#if JAMVM_ENGINE_LEVEL >= 1
@@ -1045,7 +1054,7 @@ index dd2b875..4a32246 100644
  
  /* Define to 1 if you can safely include both <sys/time.h> and <time.h>. */
  #define TIME_WITH_SYS_TIME 1
-@@ -186,7 +217,12 @@
+@@ -186,7 +226,12 @@
  #undef TRACEDLL
  
  /* defined if object finalisation tracing enabled for debugging */
@@ -1059,7 +1068,7 @@ index dd2b875..4a32246 100644
  
  /* defined if gc tracing enabled for debugging */
  //#define TRACEGC 0
-@@ -200,8 +236,7 @@
+@@ -200,8 +245,7 @@
  /* defined if thread creation tracing enabled for debugging */
  #undef TRACETHREAD
  

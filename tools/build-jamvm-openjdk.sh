@@ -61,8 +61,9 @@ INC="-I . -I $PROJECT_ROOT/src/jamvm -I $PROJECT_ROOT/src/openjdk -I os/amiga -I
 # classlib's jvm.c (JVM_GetVersionInfo) needs them (gnuclasspath has no jvm.c).
 # -fPIC: the VM objects go into the shared libjvm.so (see linking section).
 # Interpreter engine level (see src/config.h): 0 switch, 1 threaded, 2 direct,
-# 3 inline-threaded (the code-copying engine).  3 is upstream's powerpc default.
-JAMVM_ENGINE=${JAMVM_ENGINE:-3}
+# 3 inline-threaded (the code-copying engine).  Upstream defaults to 3 on
+# powerpc; we default to 2 because 3 miscompiles here -- docs/ppc32-performance.md.
+JAMVM_ENGINE=${JAMVM_ENGINE:-2}
 CFLAGS="-mcrt=clib4 -O2 -W -Wall -fPIC -D__USE_INLINE__ -DUSE_ZIP \
  -DJAMVM_ENGINE_LEVEL=$JAMVM_ENGINE \
  -DOPENJDK_VERSION=8 -DJSR292 -DJSR308 -DJSR335 -DJSR901 \
@@ -90,6 +91,17 @@ done
 # handler bodies apart or splice shared tails between them.  Applies to the
 # interpreter translation units only.
 INTERP_CFLAGS="-fno-reorder-blocks"
+# Only meaningful at level 3, where handler machine code is copied out of
+# interp.c.  JamVM decides what may be copied by compiling the interpreter twice
+# and memcmp'ing each handler between the two builds (relocatability.c) -- but a
+# PC-relative branch to a target OUTSIDE the handler has the SAME encoding in
+# both copies, so it passes that test and then points somewhere else once the
+# block is moved.  Modern gcc manufactures exactly those by merging the common
+# tails of different handlers, which upstream's lone -fno-reorder-blocks does not
+# prevent.  This is a hypothesis for why level 3 miscompiles here, not a proven
+# fix: it is untested on hardware, which is why 2 remains the default.
+[ "$JAMVM_ENGINE" -ge 3 ] 2>/dev/null && \
+    INTERP_CFLAGS="$INTERP_CFLAGS -fno-crossjumping -fno-tree-tail-merge"
 icompile() { ppc-amigaos-gcc $CFLAGS $INTERP_CFLAGS -c "$1" -o "$OUT/$2.o"; OBJS="$OBJS $OUT/$2.o"; }
 
 echo "=== interpreter ==="
