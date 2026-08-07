@@ -32,6 +32,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -264,6 +265,98 @@ Finally:
     free((void *)argv);
     free((void *)envv);
     return resultPid;
+}
+
+/*
+ * Reads everything the pipe has RIGHT NOW and stops -- never blocks, never
+ * grows without bound.
+ *
+ * UNIXProcess drains the child's output when it exits, so that a caller who
+ * has not read yet still gets it after the fd is closed.  Neither obvious way
+ * of doing that works here:
+ *
+ *   - The stock loop trusts available() to bound it, and available() cannot
+ *     answer for a clib4 pipe: fstat says S_IFIFO, clib4 implements no
+ *     FIONREAD, and the lseek fallback is meaningless on a pipe.  It returned
+ *     a count that never decreased and the reaper ate the heap.
+ *   - Reading to EOF instead removes the OOM but blocks whenever the write end
+ *     outlives the child, and a reaper stuck in a native read never reaches an
+ *     interpreter safepoint, never runs in.close(), and holds its pipe handles
+ *     open for the life of the process.  DOS then still sees the process, and
+ *     the jars cannot be replaced.
+ *
+ * So: switch the fd to non-blocking, read until it says EAGAIN, put the flag
+ * back.  clib4 supports O_NONBLOCK on pipes (fdhookentry.c tests
+ * FDF_NON_BLOCKING alongside FDF_PIPE).  Bounded by DRAIN_MAX as well, so even
+ * a pipe that somehow always has more cannot exhaust the heap.
+ *
+ * Returns NULL when nothing was waiting, which the caller reads as "no
+ * stragglers"; an empty array would instead mean a stream that is open and
+ * eternally empty.
+ */
+#define DRAIN_MAX (256 * 1024)
+
+JNIEXPORT jbyteArray JNICALL
+Java_java_lang_UNIXProcess_drainPipe0(JNIEnv *env, jclass clazz, jint fd) {
+    char *buf = NULL;
+    size_t cap = 8192, len = 0;
+    int flags, restore = 0;
+    jbyteArray result = NULL;
+
+    (void)clazz;
+
+    if (fd < 0) {
+        return NULL;
+    }
+
+    if ((flags = fcntl(fd, F_GETFL, 0)) >= 0 &&
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0) {
+        restore = 1;
+    }
+    /* If the flag would not take, read anyway: at worst we block once on a
+       pipe that has data, which is what the caller wanted regardless. */
+
+    if ((buf = malloc(cap)) == NULL) {
+        goto done;
+    }
+
+    for (;;) {
+        ssize_t n;
+
+        if (len == cap) {
+            char *bigger;
+            if (cap >= DRAIN_MAX) {
+                break;                  /* enough; the rest is the child's loss */
+            }
+            cap *= 2;
+            if ((bigger = realloc(buf, cap)) == NULL) {
+                break;                  /* keep what we have */
+            }
+            buf = bigger;
+        }
+
+        n = read(fd, buf + len, cap - len);
+        if (n > 0) {
+            len += (size_t)n;
+            continue;
+        }
+        /* 0 is EOF, -1 with EAGAIN is "nothing more right now"; either way we
+           are done.  Any other error is done too -- there is nobody to tell. */
+        break;
+    }
+
+done:
+    if (restore) {
+        fcntl(fd, F_SETFL, flags);
+    }
+
+    if (len > 0) {
+        if ((result = (*env)->NewByteArray(env, (jsize)len)) != NULL) {
+            (*env)->SetByteArrayRegion(env, result, 0, (jsize)len, (jbyte *)buf);
+        }
+    }
+    free(buf);
+    return result;
 }
 
 /*

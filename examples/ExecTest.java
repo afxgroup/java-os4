@@ -276,11 +276,17 @@ public class ExecTest {
                 return;
             }
             p.destroy();
-            pass("destroy does not throw", "(a request, not a kill -- see amiga_process.c)");
-            try {
-                p.getOutputStream().close();
-            } catch (IOException ignored) {
-            }
+            /*
+             * Then WAIT for it, bounded.  Leaving a child running would be a
+             * bad citizen anywhere; here it is worse, because nothing can kill
+             * it afterwards and its reaper would spin for the life of the VM
+             * holding the pipe handles open.  destroy() closed our end of its
+             * stdin, so a well-behaved child sees EOF and goes.
+             */
+            boolean gone = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            pass("destroy does not throw",
+                 gone ? "child exited after destroy"
+                      : "child still running (destroy is a request, not a kill)");
         } catch (Throwable t) {
             fail("destroy does not throw", t);
         }

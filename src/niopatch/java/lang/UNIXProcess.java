@@ -220,6 +220,14 @@ final class UNIXProcess extends Process {
      */
     private static native int waitForProcessExit0(int pid, int timeoutMillis);
 
+    /**
+     * AmigaOS: everything the pipe has right now, or null if it had nothing.
+     * Never blocks (the fd goes non-blocking for the duration) and never grows
+     * without bound.  See src/openjdk/amiga_process.c for why neither
+     * available() nor read-to-EOF can do this job here.
+     */
+    private static native byte[] drainPipe0(int fd);
+
     /** Loops the bounded wait until the child is gone. */
     private static int awaitProcessExit(int pid) {
         int exitcode;
@@ -622,15 +630,32 @@ final class UNIXProcess extends Process {
          */
         private static byte[] drainInputStream(InputStream in)
                 throws IOException {
-            java.io.ByteArrayOutputStream collected =
-                new java.io.ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
-            int r;
-
-            while ((r = in.read(buf)) > 0) {
-                collected.write(buf, 0, r);
+            /*
+             * Straight to the descriptor, because neither Java-level way works
+             * on a clib4 pipe.  The stock loop bounds itself with available(),
+             * which cannot answer for one (no FIONREAD) and used to answer with
+             * a count that never decreased -- the reaper ate the heap.  Reading
+             * to EOF instead blocks whenever the write end outlives the child,
+             * and a reaper stuck in a native read never runs the in.close()
+             * below: that is thirty PIPE: handles still open at exit, with DOS
+             * still holding the process.
+             */
+            if (in instanceof FileInputStream) {
+                return drainPipe0(fdAccess.get(((FileInputStream) in).getFD()));
             }
-            return collected.size() == 0 ? null : collected.toByteArray();
+            /* Not one of ours; fall back to the stock behaviour. */
+            int n = 0;
+            int j;
+            byte[] a = null;
+            while ((j = in.available()) > 0) {
+                a = (a == null) ? new byte[j] : Arrays.copyOf(a, n + j);
+                int r = in.read(a, n, j);
+                if (r <= 0) {
+                    break;
+                }
+                n += r;
+            }
+            return (a == null || n == a.length) ? a : Arrays.copyOf(a, n);
         }
 
         /** Called by the process reaper thread when the process exits. */
