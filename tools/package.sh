@@ -162,6 +162,47 @@ for j in sunjce_provider.jar sunec.jar localedata.jar zipfs.jar dnsns.jar; do
         echo "  WARN: missing $JDK8/jre/lib/ext/$j"
 done
 
+# --- sunjce_provider.jar: counter mode in C --------------------------------
+# GCTR and AESCrypt are replaced so GCM's counter loop runs natively, once per
+# TLS record (src/openjdk/amiga_crypto.c).  They go INSIDE the jar rather than
+# on the boot class path, which is where GHASH could go: AESCrypt extends
+# SymmetricCipher, package-private in the extension loader, so a boot-loaded
+# copy would extend a DIFFERENT SymmetricCipher from the one that
+# CipherBlockChaining and GCTR hold -- ClassCastException, not something
+# widening access can repair.
+#
+# No signature to worry about, which was the part expected to hurt.  JDK 8
+# requires JCE providers to be signed by a key Oracle trusts, and the plan was
+# to disable that check in javax.crypto.JceSecurity -- a real weakening.  It
+# turns out Temurin's sunjce_provider.jar carries only a MANIFEST.MF, and
+# jce.jar holds no signature files at all: being an OpenJDK build, the signed-
+# provider mechanism is not in force here.  If it were, its own SunJCE would
+# not load.  So nothing is disabled and nothing is stripped.
+SJP="$RT/lib/ext/sunjce_provider.jar"
+SJPATCH="$PROJECT_ROOT/src/sunjcepatch"
+if [ -f "$SJP" ] && [ -d "$SJPATCH" ]; then
+    SJTMP="$B/.sunjce"
+
+    rm -rf "$SJTMP"; mkdir -p "$SJTMP"
+    (cd "$SJPATCH" && "$BOOT_JDK/bin/javac" -source 8 -target 8 -nowarn \
+        -cp "$SJP" -d "$SJTMP" \
+        com/sun/crypto/provider/GCTR.java \
+        com/sun/crypto/provider/AESCrypt.java 2>/dev/null) \
+    && (cd "$SJTMP" && "$BOOT_JDK/bin/jar" uf "$SJP" \
+        com/sun/crypto/provider/GCTR.class \
+        com/sun/crypto/provider/AESCrypt.class)
+
+    # Confirmed by looking, not assumed: the check is whether the class now in
+    # the jar actually carries the native method.
+    if unzip -p "$SJP" com/sun/crypto/provider/GCTR.class 2>/dev/null \
+       | grep -qa updateNative; then
+        echo "  sunjce_provider.jar: native GCTR/AESCrypt in"
+    else
+        echo "  WARN: sunjce_provider.jar unpatched -- AES stays interpreted"
+    fi
+    rm -rf "$SJTMP"
+fi
+
 # JamVM -jar dispatch path requires jamvm.java.lang.JarLauncher to be available
 # on the boot class path.  In OpenJDK mode JamVM includes java.home/classes by
 # default, so compile and ship the class there.
