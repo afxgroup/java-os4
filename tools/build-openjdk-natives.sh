@@ -540,13 +540,15 @@ done
 # UNIXProcess_md.c.  Paired with src/niopatch/java/lang/UNIXProcess.java, which
 # adds the AMIGAOS arm to Platform.get() -- without it Runtime.exec throws
 # "AmigaOS is not a supported OS platform" before reaching any native at all.
-if $CC $LJINC -c "$PROJECT_ROOT/src/openjdk/amiga_process.c" \
-       -o "$OUT/libjava/amiga_process.o" 2>"$OUT/e"; then
-    ok=$((ok+1)); echo "  amiga_process.c OK"
-else
-    fail=$((fail+1)); echo "  amiga_process.c FAIL"
-    grep -m3 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
-fi
+for extra in amiga_process amiga_crypto; do
+    if $CC $LJINC -c "$PROJECT_ROOT/src/openjdk/$extra.c" \
+           -o "$OUT/libjava/$extra.o" 2>"$OUT/e"; then
+        ok=$((ok+1)); echo "  $extra.c OK"
+    else
+        fail=$((fail+1)); echo "  $extra.c FAIL"
+        grep -m3 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
+    fi
+done
 
 echo "  libjava compile: $ok OK, $fail FAILED"
 
@@ -657,10 +659,12 @@ if [ -f "$NIOP/sun/nio/fs/DefaultFileSystemProvider.java" ]; then
     (cd "$NIOP" \
     && "$BOOT_JDK/bin/javac" -source 8 -target 8 \
         sun/nio/fs/DefaultFileSystemProvider.java java/io/UnixFileSystem.java \
-        java/lang/UNIXProcess.java java/lang/AmigaDiag.java 2>/dev/null \
+        java/lang/UNIXProcess.java java/lang/AmigaDiag.java \
+        com/sun/crypto/provider/GHASH.java 2>/dev/null \
     && "$BOOT_JDK/bin/jar" cf "$OUT/niopatch.zip" \
         sun/nio/fs/DefaultFileSystemProvider.class java/io/UnixFileSystem.class \
-        java/lang/UNIXProcess*.class java/lang/AmigaDiag.class) \
+        java/lang/UNIXProcess*.class java/lang/AmigaDiag.class \
+        com/sun/crypto/provider/GHASH*.class) \
     && echo "  niopatch.zip OK ($(wc -c < "$OUT/niopatch.zip") bytes)" \
     || echo "  niopatch.zip FAIL"
 fi
