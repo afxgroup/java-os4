@@ -1764,10 +1764,10 @@ index 6edb60b..6886837 100644
  }
  
 diff --git a/src/os/amiga/os.c b/src/os/amiga/os.c
-index 5561c20..b72d22d 100644
+index 5561c20..04303a0 100644
 --- a/src/os/amiga/os.c
 +++ b/src/os/amiga/os.c
-@@ -19,241 +19,211 @@
+@@ -19,241 +19,226 @@
   * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
   */
  
@@ -2076,7 +2076,22 @@ index 5561c20..b72d22d 100644
 -
 -    return libraryInfo;
 +
-+    h = dlopen(p, RTLD_LAZY);
++    /*
++     * RTLD_GLOBAL, not the bare RTLD_LAZY this used to pass.
++     *
++     * The JDK's native libraries reference each other: libfontmanager calls
++     * GetNativePrim in libawt, libamigaawt calls registerAmigaAwtCleanup in
++     * libjvm, and upstream expresses that with DT_NEEDED between them.  We
++     * cannot: our libraries live in JAVA: while the rpath points at
++     * JAVA:Sobjs, and a second rpath entry is not expressible -- the separator
++     * would be ':', which is already the volume separator here.
++     *
++     * Loading them into one shared namespace instead is what every Unix JVM
++     * ends up doing anyway, and clib4 supports it (dlopen maps RTLD_GLOBAL to
++     * ELF32_RTLD_GLOBAL).  Without it each library is an island and the
++     * cross-references fail at the first call, not at load time.
++     */
++    h = dlopen(p, RTLD_LAZY | RTLD_GLOBAL);
 +    DebugPrintF("[DLOPEN] '%s' -> %p%s\n", p, h,
 +                h ? "" : " FAILED");
 +    return h;

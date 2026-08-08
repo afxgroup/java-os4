@@ -97,6 +97,24 @@ cp "$CLIB4_SO_DIR/libc.so" "$CLIB4_SO_DIR/libpthread.so" \
 cp "$LIBZ_SO_FILE" "$SOBJ/libz.so.1"
 cp "$LIBGCC_SO_FILE" "$SOBJ/"
 
+# freetype's compressed-font paths: bzip2 for .pcf.bz2 and the PCF/BDF readers,
+# brotli for WOFF2.  Shipped rather than statically linked because Sobjs/ is
+# where the rpath already points, and because more than one library will want
+# them.  Absent is not fatal -- the symbols only bind when a font that needs
+# them is opened -- so warn and carry on rather than fail the release.
+# Asked of the compiler rather than looked for in CLIB4_SO_DIR: these come from
+# the SDK's local/ tree, not the same directory as libc, and -print-file-name is
+# the same search the link used -- so what gets shipped is what got linked.
+# From SDK_LOCAL_CLIB4_LIB, the same directory the link took them from -- they
+# live in the SDK's local/ tree, not beside libc.
+for so in libbz2.so libbrotlidec.so libbrotlicommon.so; do
+    if [ -f "$SDK_LOCAL_CLIB4_LIB/$so" ]; then
+        cp "$SDK_LOCAL_CLIB4_LIB/$so" "$SOBJ/"
+    else
+        echo "  NOTE: $so not in $SDK_LOCAL_CLIB4_LIB; freetype's compressed-font paths stay unresolved"
+    fi
+done
+
 # --- runtime: clib4.library (the C runtime the VM + .so stubs call into) ---
 # The bundled .so stubs (libc.so, ...) are clib4.library front-ends; the real
 # C runtime lives in clib4.library, which must be present in LIBS: at runtime.
@@ -273,19 +291,23 @@ README
 # report anything new.  KNOWN_MISSING lists the gaps we accept, with a reason;
 # anything outside it is a regression worth looking at before release.
 KNOWN_MISSING="
-BZ2_bzDecompress BZ2_bzDecompressEnd BZ2_bzDecompressInit BrotliDecoderDecompress
 png_create_info_struct png_create_read_struct png_destroy_read_struct png_error
 png_get_IHDR png_get_error_ptr png_get_io_ptr png_get_valid png_read_end
 png_read_image png_read_info png_read_update_info png_set_expand_gray_1_2_4_to_8
 png_set_filler png_set_gray_to_rgb png_set_interlace_handling png_set_longjmp_fn
 png_set_packing png_set_palette_to_rgb png_set_read_fn
 png_set_read_user_transform_fn png_set_strip_16 png_set_tRNS_to_alpha
-fork vfork
 "
-# libfontmanager: freetype's optional PNG (colour-emoji bitmaps), bzip2 and WOFF2
-#   paths.  Unreachable with the TrueType fonts we ship; fixing them means
-#   bundling libpng/libbz2/brotli.
-# fork/vfork: clib4 has neither, so java.lang.ProcessBuilder cannot work at all.
+# libfontmanager: freetype's optional PNG path (colour-emoji bitmaps).
+#   Unreachable with the TrueType fonts we ship, and the SDK has libpng only as
+#   a static archive; a libpng.so in the clib4 lib dir would close it.
+#
+# bzip2 and brotli used to be listed here too.  They are shipped in Sobjs/ now,
+# so freetype's compressed-font and WOFF2 paths resolve.
+#
+# fork/vfork used to be listed as "clib4 has neither, so ProcessBuilder cannot
+# work at all".  Both halves are obsolete: forkAndExec is built on spawnvpe and
+# nothing references fork any more (checked -- no shipped .so mentions it).
 SYMS_PROVIDED=$B/.syms-provided
 SYMS_NEEDED=$B/.syms-needed
 : > "$SYMS_PROVIDED"

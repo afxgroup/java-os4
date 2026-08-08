@@ -274,8 +274,24 @@ else
 fi
 
 echo "  libfontmanager compile: $fok OK, $ffail FAILED"
+# freetype reaches for bzip2 (compressed PCF/BDF) and brotli (WOFF2) when it was
+# configured with them.  Both are shipped in Sobjs/, where the rpath already
+# points.  Link only what is actually there: on an SDK without them the symbols
+# stay unresolved exactly as before, which costs nothing until a font that needs
+# them is opened.
+# Tested against the directory FT_LIB points at, NOT with -print-file-name:
+# that returns its argument unchanged when the library is not found, so the
+# obvious "does it come back with a path" check passes for everything.
+FM_COMPRESSION=""
+for l in bz2 brotlidec brotlicommon; do
+    [ -f "$SDK_LOCAL_CLIB4_LIB/lib$l.so" ] && FM_COMPRESSION="$FM_COMPRESSION -l$l"
+done
+[ -n "$FM_COMPRESSION" ] \
+    && echo "  compression libs:$FM_COMPRESSION" \
+    || echo "  compression libs: none found (bzip2/WOFF2 fonts stay unavailable)"
 if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
-       -o "$OUT/libfontmanager.so" "$OUT"/libfontmanager/*.o $FT_LIB -lfreetype 2>"$OUT/e"; then
+       -o "$OUT/libfontmanager.so" "$OUT"/libfontmanager/*.o $FT_LIB -lfreetype \
+       $FM_COMPRESSION 2>"$OUT/e"; then
     echo "  libfontmanager.so OK ($(wc -c < "$OUT/libfontmanager.so") bytes)"
 else
     echo "  libfontmanager.so LINK FAIL"; head -10 "$OUT/e"
