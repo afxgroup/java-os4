@@ -132,11 +132,14 @@ abstract class SeedGenerator {
          * AmigaOS: a real entropy source, before the threaded fallback.
          *
          * securerandom.source is set to file:/RANDOM: here, which is not one of
-         * the two names this class special-cases, so it goes to URLSeedGenerator
-         * -- and RANDOM: is not a device AmigaOS actually has.  That throws, and
-         * what is left is ThreadedSeedGenerator, which gathers entropy by racing
-         * threads and counting.  On this machine that costs 25-30 seconds before
-         * the first byte of any TLS connection, paid again in every JVM.
+         * the two names this class special-cases, so it goes to URLSeedGenerator.
+         *
+         * RANDOM: is a real AmigaOS device that open/fopen read without trouble.
+         * What fails is Java's file: URL layer -- "Failed to open file:/RANDOM:"
+         * -- so the repair could equally have gone there.  What is left instead
+         * is ThreadedSeedGenerator, racing threads and counting, which cost
+         * 25-30 seconds before the first byte of any TLS connection and was paid
+         * again in every JVM.  With getentropy it is 11.
          *
          * clib4 provides getentropy(), so there is no need to race anything.
          * Tried before the fallback rather than instead of it: if the native is

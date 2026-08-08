@@ -392,10 +392,17 @@ Java_sun_security_provider_SHA2_implCompressNative(JNIEnv *env, jclass clazz,
  * sun.security.provider.SeedGenerator's source of last resort.
  *
  * The runtime ships securerandom.source=file:/RANDOM:, which is neither of the
- * two names SeedGenerator special-cases, so it goes to URLSeedGenerator -- and
- * RANDOM: is not a device AmigaOS has.  That throws, leaving
- * ThreadedSeedGenerator, which gathers entropy by racing threads and counting
- * iterations.  On this hardware that is 25-30 seconds before the first byte of
+ * two names SeedGenerator special-cases, so it goes to URLSeedGenerator.
+ *
+ * RANDOM: is a perfectly real AmigaOS device and open/fopen read it without
+ * trouble -- what fails is Java's file: URL layer, which reports
+ *
+ *     Failed to create seed generator with file:/RANDOM::
+ *     java.io.IOException: Failed to open file:/RANDOM:
+ *
+ * and leaves ThreadedSeedGenerator, which gathers entropy by racing threads
+ * and counting iterations.  Making the URL path work would be the other repair;
+ * this one avoids needing it.  On this hardware that is 25-30 seconds before the first byte of
  * any TLS connection, and it is paid again in every JVM.
  *
  * clib4 has getentropy(), so none of that racing is necessary.
