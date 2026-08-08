@@ -936,6 +936,62 @@ else
     echo "  libnio.so LINK FAIL"; head -10 "$OUT/e"
 fi
 
+# Socket defaults: TCP_NODELAY, and a receive window worth having.
+#
+# Roadshow's defaults are not Linux's, and on any link with latency the receive
+# window is what caps a download -- no buffer size in the Java code can lift it.
+# Nagle matters the other way round: with it on, a request written before the
+# reply is read waits on the peer's delayed ACK, which is HTTP's whole shape.
+#
+# Raise, never lower: if the stack already offers more than we ask for, leave it
+# alone.  Applied to stream sockets only -- a datagram socket has no Nagle and
+# no window.  NetTest reports the values, so the effect is measurable rather
+# than assumed.
+PSI="$J/src/solaris/native/java/net/PlainSocketImpl.c"
+if [ -f "$PSI" ] && ! grep -q "AMIGA_SOCK_DEFAULTS" "$PSI"; then
+    python3 - "$PSI" <<'AMIGA_PSI_PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = """    }
+
+    (*env)->SetIntField(env, fdObj, IO_fd_fdID, fd);
+}"""
+new = """    }
+
+#ifdef __amigaos4__ /* AMIGA_SOCK_DEFAULTS */
+    if (stream) {
+        int on = 1;
+        int want = 64 * 1024;
+        int cur = 0;
+        socklen_t len = sizeof(cur);
+
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char *)&on, sizeof(on));
+
+        if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&cur, &len) == 0
+                && cur < want) {
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&want, sizeof(want));
+        }
+
+        cur = 0;
+        len = sizeof(cur);
+        if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char *)&cur, &len) == 0
+                && cur < want) {
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char *)&want, sizeof(want));
+        }
+    }
+#endif
+
+    (*env)->SetIntField(env, fdObj, IO_fd_fdID, fd);
+}"""
+if s.count(old) == 1:
+    open(p, "w").write(s.replace(old, new, 1))
+    print("=== adapted PlainSocketImpl.c (amigaos: TCP_NODELAY + 64K buffers) ===")
+else:
+    print("  WARN: socketCreate tail not uniquely found; socket defaults NOT applied")
+AMIGA_PSI_PY
+fi
+
 echo "=== libnet.so (java.net) ==="
 # The real java.net natives.  They were a stub until now, which is why the first
 # socket use died with "UnsatisfiedLinkError: initProto" -- PlainSocketImpl's

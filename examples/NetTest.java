@@ -62,6 +62,7 @@ public class NetTest {
         udpSocket();
         dns(host);
         tcpConnect(host, port);
+        socketBuffers();
         httpGet(host);
         cryptoProviders();
         httpsGet(host);
@@ -221,6 +222,42 @@ public class NetTest {
             skip("TCP connect " + host + ":" + port, e.toString());
         } catch (Throwable t) {
             fail("TCP connect " + host + ":" + port, t);
+        } finally {
+            closeQuietly(s);
+        }
+    }
+
+    /*
+     * What the stack actually gives us, rather than what we hope.
+     *
+     * Throughput on a link with any latency is capped by the receive window,
+     * so a small default SO_RCVBUF limits a download no matter how fast the
+     * line is -- and Roadshow's defaults are not Linux's.  TCP_NODELAY matters
+     * the other way: with Nagle on, a small request written before the reply
+     * is read can sit waiting for the peer's delayed ACK.  Both are reported
+     * rather than asserted, because the right values are the machine's to say.
+     */
+    private static void socketBuffers() {
+        Socket s = null;
+        try {
+            s = new Socket();
+            int rcv = s.getReceiveBufferSize();
+            int snd = s.getSendBufferSize();
+            pass("socket buffers", "SO_RCVBUF=" + rcv + " SO_SNDBUF=" + snd);
+
+            s.setTcpNoDelay(true);
+            check("TCP_NODELAY can be set", s.getTcpNoDelay(),
+                  "reads back " + s.getTcpNoDelay());
+
+            /* Does asking for more actually get more?  If the stack silently
+               ignores it, tuning from Java is a dead end and the default has
+               to be right at creation instead. */
+            s.setReceiveBufferSize(64 * 1024);
+            int grown = s.getReceiveBufferSize();
+            check("SO_RCVBUF is settable", grown > rcv || grown >= 64 * 1024,
+                  rcv + " -> " + grown + " (asked for " + (64 * 1024) + ")");
+        } catch (Throwable t) {
+            fail("socket buffers", t);
         } finally {
             closeQuietly(s);
         }
