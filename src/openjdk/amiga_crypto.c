@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "jni.h"
 
@@ -384,4 +385,50 @@ Java_sun_security_provider_SHA2_implCompressNative(JNIEnv *env, jclass clazz,
     st[6] = (jint)((uint32_t)st[6] + g); st[7] = (jint)((uint32_t)st[7] + h);
 
     (*env)->ReleaseIntArrayElements(env, stateArr, st, 0);
+}
+
+/* ---- entropy --------------------------------------------------------- *
+ *
+ * sun.security.provider.SeedGenerator's source of last resort.
+ *
+ * The runtime ships securerandom.source=file:/RANDOM:, which is neither of the
+ * two names SeedGenerator special-cases, so it goes to URLSeedGenerator -- and
+ * RANDOM: is not a device AmigaOS has.  That throws, leaving
+ * ThreadedSeedGenerator, which gathers entropy by racing threads and counting
+ * iterations.  On this hardware that is 25-30 seconds before the first byte of
+ * any TLS connection, and it is paid again in every JVM.
+ *
+ * clib4 has getentropy(), so none of that racing is necessary.
+ */
+JNIEXPORT jboolean JNICALL
+Java_sun_security_provider_SeedGenerator_nativeSeed(JNIEnv *env, jclass clazz,
+                                                    jbyteArray result, jint len) {
+    unsigned char chunk[256];
+    jint done = 0;
+
+    (void)clazz;
+
+    if (result == NULL || len <= 0
+            || (*env)->GetArrayLength(env, result) < len) {
+        return JNI_FALSE;
+    }
+
+    /* getentropy refuses more than 256 bytes at a time, by its contract. */
+    while (done < len) {
+        size_t want = (size_t)(len - done);
+
+        if (want > sizeof(chunk)) {
+            want = sizeof(chunk);
+        }
+        if (getentropy(chunk, want) != 0) {
+            return JNI_FALSE;
+        }
+        (*env)->SetByteArrayRegion(env, result, done, (jsize)want, (jbyte *)chunk);
+        done += (jint)want;
+    }
+
+    /* Not a security measure -- the bytes have already been copied out -- but
+       leaving a buffer of live entropy on the stack costs nothing to avoid. */
+    memset(chunk, 0, sizeof(chunk));
+    return JNI_TRUE;
 }

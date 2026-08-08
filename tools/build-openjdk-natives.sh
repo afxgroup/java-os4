@@ -661,12 +661,14 @@ if [ -f "$NIOP/sun/nio/fs/DefaultFileSystemProvider.java" ]; then
         sun/nio/fs/DefaultFileSystemProvider.java java/io/UnixFileSystem.java \
         java/lang/UNIXProcess.java java/lang/AmigaDiag.java \
         com/sun/crypto/provider/GHASH.java \
-        sun/security/provider/SHA2.java sun/security/provider/SHA5.java 2>/dev/null \
+        sun/security/provider/SHA2.java sun/security/provider/SHA5.java \
+        sun/security/provider/SeedGenerator.java 2>/dev/null \
     && "$BOOT_JDK/bin/jar" cf "$OUT/niopatch.zip" \
         sun/nio/fs/DefaultFileSystemProvider.class java/io/UnixFileSystem.class \
         java/lang/UNIXProcess*.class java/lang/AmigaDiag.class \
         com/sun/crypto/provider/GHASH*.class \
-        sun/security/provider/SHA2*.class sun/security/provider/SHA5*.class) \
+        sun/security/provider/SHA2*.class sun/security/provider/SHA5*.class \
+        sun/security/provider/SeedGenerator*.class) \
     && echo "  niopatch.zip OK ($(wc -c < "$OUT/niopatch.zip") bytes)" \
     || echo "  niopatch.zip FAIL"
 fi
