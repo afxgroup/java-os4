@@ -95,6 +95,15 @@ public class NetDownload {
         long windowStart = start;
         long windowBytes = 0;
         double speed = 0;
+        /* The spread matters as much as the average.  A transfer that averages
+           1 MB/s by alternating 250 KB/s and 2 MB/s is not a slow transfer, it
+           is a stalling one, and the two have different causes -- bandwidth
+           versus something pausing the VM.  Eyeballing a progress line cannot
+           tell them apart across runs; these can. */
+        double slowest = Double.MAX_VALUE;
+        double fastest = 0;
+        int samples = 0;
+        int stalls = 0;
 
         try {
             int n;
@@ -114,6 +123,21 @@ public class NetDownload {
                     windowStart = now;
                     windowBytes = 0;
                     lastDraw = now;
+
+                    /* Skip the first sample: it covers the ramp from the first
+                       byte and is always the outlier, which would make every
+                       run look like it stalled at the start. */
+                    if (samples++ > 0) {
+                        if (speed < slowest) {
+                            slowest = speed;
+                        }
+                        if (speed > fastest) {
+                            fastest = speed;
+                        }
+                        if (speed * 4 < fastest) {
+                            stalls++;
+                        }
+                    }
                     draw(done, total, speed);
                 }
             }
@@ -130,6 +154,21 @@ public class NetDownload {
         System.out.println();
         System.out.println("got   : " + bytes(done) + " in " + seconds(elapsed / 1000)
                            + "  (avg " + bytes((long)(done * 1000.0 / elapsed)) + "/s)");
+
+        if (samples > 2) {
+            System.out.println("spread: " + bytes((long) slowest) + "/s .. "
+                               + bytes((long) fastest) + "/s, "
+                               + stalls + " of " + (samples - 1)
+                               + " samples below a quarter of peak");
+            if (stalls * 4 > samples) {
+                /* Steady-but-slow and fast-but-stalling need looking at in
+                   different places, so say which this was rather than leave it
+                   to be inferred from a scrolling line. */
+                System.out.println("        -- stalling, not merely slow; try "
+                                   + "-verbose:gc to see if the pauses are the "
+                                   + "collector");
+            }
+        }
 
         /* A short read looks like success until you open the file: the stream
          * just ends.  Say so. */
