@@ -1,5 +1,5 @@
 diff --git a/src/alloc.c b/src/alloc.c
-index 536c720..7f32d9c 100644
+index 536c720..eb601f0 100644
 --- a/src/alloc.c
 +++ b/src/alloc.c
 @@ -191,6 +191,12 @@ static VMLock registered_refs_lock;
@@ -15,7 +15,14 @@ index 536c720..7f32d9c 100644
  /* A pointer to the finalizer thread. */
  static Thread *finalizer_thread;
  
-@@ -289,6 +295,33 @@ void clearMarkBits() {
+@@ -286,9 +292,40 @@ void clearMarkBits() {
+     memset(markbits, 0, markbit_size * sizeof(*markbits));
+ }
+ 
++#ifdef __amigaos4__
++#include <proto/exec.h>
++#endif
++
  int initialiseAlloc(InitArgs *args) {
      char *mem = (char*)mmap(0, args->max_heap, PROT_READ|PROT_WRITE,
                                                 MAP_PRIVATE|MAP_ANON, -1, 0);
@@ -49,7 +56,32 @@ index 536c720..7f32d9c 100644
      if(mem == MAP_FAILED) {
          perror("Couldn't allocate the heap; try reducing the max "
                 "heap size (-Xmx)");
-@@ -1788,6 +1821,13 @@ void asyncGCThreadLoop(Thread *self) {
+@@ -309,6 +346,24 @@ int initialiseAlloc(InitArgs *args) {
+     freelist->next = NULL;
+ 
+     TRACE_GC("Alloced heap size %p\n", heaplimit-heapbase);
++
++#ifdef __amigaos4__
++    /*
++     * The heap's address range, on the serial line, once.
++     *
++     * A DSI exception gives a faulting address and nothing else, and the first
++     * question about it is always the same: is that address a Java object at
++     * all?  Answering it has twice meant reasoning backwards from a register
++     * dump.  With this line the answer is a comparison -- inside [heapbase,
++     * heapmax) means the object is real and something about its LAYOUT is
++     * wrong; outside means the pointer never belonged to the heap and the
++     * fault is a stale or corrupted reference.  Those two lead opposite ways.
++     */
++    DebugPrintF("[HEAP] base=%p limit=%p max=%p (map %p..%p, %ldMB)\n",
++                heapbase, heaplimit, heapmax, mem, mem + args->max_heap,
++                (long)(args->max_heap / MB));
++#endif
++
+     allocMarkBits();
+ 
+     /* Initialise GC locks */
+@@ -1788,6 +1843,13 @@ void asyncGCThreadLoop(Thread *self) {
      for(;;) {                                                                 \
          waitVMWaitLock(list##_lock, self);                                    \
                                                                                \
@@ -63,7 +95,7 @@ index 536c720..7f32d9c 100644
          if((list##_start == list##_size) && (list##_end == 0))                \
              continue;                                                         \
                                                                                \
-@@ -1846,6 +1886,28 @@ void referenceHandlerThreadLoop(Thread *self) {
+@@ -1846,6 +1908,28 @@ void referenceHandlerThreadLoop(Thread *self) {
                          "<GC: enqueuing %d references>\n", self, &self);
  }
  
@@ -92,7 +124,7 @@ index 536c720..7f32d9c 100644
  int initialiseGC(InitArgs *args) {
      /* Pre-allocate an OutOfMemoryError exception object - we throw it
       * when we're really low on heap space, and can create FA... */
-@@ -2023,7 +2085,8 @@ void *gcMalloc(int len) {
+@@ -2023,7 +2107,8 @@ void *gcMalloc(int len) {
  
                  state = throw_oom;
                  unlockVMLock(heap_lock, self);
@@ -102,7 +134,7 @@ index 536c720..7f32d9c 100644
                  return NULL;
                  break;
  
-@@ -2075,8 +2138,14 @@ got_it:
+@@ -2075,8 +2160,14 @@ got_it:
      Thread *self;                                                             \
      disableSuspend(self = threadSelf());                                      \
      lockVMLock(has_fnlzr_lock, self);                                         \
@@ -119,7 +151,7 @@ index 536c720..7f32d9c 100644
      if(has_finaliser_count == has_finaliser_size) {                           \
          has_finaliser_size += LIST_INCREMENT;                                 \
          has_finaliser_list = sysRealloc(has_finaliser_list,                   \
-@@ -2116,9 +2185,17 @@ Object *allocObject(Class *class) {
+@@ -2116,9 +2207,17 @@ Object *allocObject(Class *class) {
  Object *allocArray(Class *class, int size, int el_size) {
      Object *ob;
  
@@ -139,7 +171,7 @@ index 536c720..7f32d9c 100644
          return NULL;
      }
  
-@@ -2309,7 +2386,32 @@ void *gcMemRealloc(void *addr, int size) {
+@@ -2309,7 +2408,32 @@ void *gcMemRealloc(void *addr, int size) {
          uintptr_t old_size = *--mem;
          uintptr_t new_size = size + sizeof(uintptr_t);
  

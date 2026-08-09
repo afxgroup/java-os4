@@ -139,6 +139,7 @@ static void close_libs() {
 static struct Window *g_windows[MAX_AWT_WINDOWS];
 static int g_atexit_registered = 0;
 static uint32 cur_x, cur_y;  /* last mouse position (for EV_MOUSE_MOVE) */
+static uint32 screen_w = 0, screen_h = 0;  /* Workbench screen size (for EV_NEWSIZE) */
 
 static void awt_atexit_cleanup(void)
 {
@@ -195,14 +196,30 @@ static jlong do_open(JNIEnv *env, jint w, jint h, jstring title, int sizable)
     struct Window *win;
     const char *t;
     char *tcopy;
+    uint32 x, y;
 
     if (!ensure_libs())
         return 0;
+
+    if (screen_w == 0 || screen_h == 0) {
+        struct Screen *scr = IIntuition->LockPubScreen(NULL);
+        if (scr != NULL) {
+            screen_w = scr->Width;
+            screen_h = scr->Height;
+            IIntuition->UnlockPubScreen(NULL, scr);
+        }
+    }
+    if (w > screen_w)
+        w = screen_w;
+    if (h > screen_h)
+        h = screen_h;
 
     windowMutex = IExec->AllocSysObjectTags(ASOT_MUTEX, TAG_DONE);
     if (!windowMutex)
         return 0;
 
+    x = (screen_w - w) / 2;
+    y = (screen_h - h) / 2;
     /* Intuition keeps the title POINTER for the window's lifetime -- it must
        outlive the JNI UTF buffer (copy freed in do_close) */
     t = (*env)->GetStringUTFChars(env, title, NULL);
@@ -213,8 +230,8 @@ static jlong do_open(JNIEnv *env, jint w, jint h, jstring title, int sizable)
         WA_Title,         (ULONG)tcopy,
         WA_InnerWidth,    w,
         WA_InnerHeight,   h,
-        WA_Left,          80,
-        WA_Top,           60,
+        WA_Left,          x,
+        WA_Top,           y,
         WA_GimmeZeroZero, TRUE,
         WA_CloseGadget,   TRUE,
         WA_DragBar,       TRUE,
@@ -449,6 +466,8 @@ Java_sun_awt_amiga_AmigaNative_screensize0(JNIEnv *env, jclass cls)
     scr = IIntuition->LockPubScreen(NULL);
     if (scr != NULL) {
         r = ((jint)scr->Width << 16) | (jint)(scr->Height & 0xFFFF);
+        screen_w = scr->Width;
+        screen_h = scr->Height;
         IIntuition->UnlockPubScreen(NULL, scr);
     }
     return r;
@@ -491,6 +510,14 @@ Java_sun_awt_amiga_AmigaNative_resize0(JNIEnv *env, jclass cls, jlong handle,
     struct Window *win = (struct Window *)(uintptr_t)handle;
     if (win == NULL)
         return;
+    
+    if (w < 0) w = 0;
+    if (h < 0) h = 0;
+    if (w + win->BorderLeft + win->BorderRight > screen_w)
+        w = screen_w - win->BorderLeft - win->BorderRight;
+    if (h + win->BorderTop + win->BorderBottom > screen_h)
+        h = screen_h - win->BorderTop - win->BorderBottom;
+
     IIntuition->ChangeWindowBox(win, win->LeftEdge, win->TopEdge,
         w + win->BorderLeft + win->BorderRight,
         h + win->BorderTop + win->BorderBottom);
