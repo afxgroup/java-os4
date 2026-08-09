@@ -28,4 +28,16 @@ public final class AmigaDiag {
      * a delta across an operation says more than any single reading.
      */
     public static native int openFdCount();
+
+    /**
+     * What the crypto natives actually did, as
+     * {gctrCalls, gctrDeclined, gctrBytes, ghashCalls, ghashBlocks}.
+     *
+     * Both natives landed and the benchmark did not move.  "Is the method
+     * native" was already answerable by reflection and said yes, which was not
+     * the same question: a native that is entered and then declines every call,
+     * or one that runs on a hundredth of the data, looks identical from
+     * outside.  These separate the cases.
+     */
+    public static native long[] cryptoStats();
 }

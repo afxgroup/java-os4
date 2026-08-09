@@ -30,6 +30,39 @@
 #include "jni.h"
 
 /*
+ * Call counters, read back through java.lang.AmigaDiag.cryptoStats().
+ *
+ * Both natives went in and the benchmark did not move: GHASH and GCTR both
+ * report "native" and AES-256-GCM sits at 507 KB/s either way.  Either they are
+ * not reached, or they decline, or the time was never in them.  Guessing
+ * between those has been the expensive way to do this all along -- these say
+ * which, and cost a few increments per TLS record.
+ */
+static volatile unsigned long gctr_calls = 0;      /* entered */
+static volatile unsigned long gctr_declined = 0;   /* returned -1 */
+static volatile unsigned long gctr_bytes = 0;      /* actually processed */
+static volatile unsigned long ghash_calls = 0;
+static volatile unsigned long ghash_blocks = 0;
+
+JNIEXPORT jlongArray JNICALL
+Java_java_lang_AmigaDiag_cryptoStats(JNIEnv *env, jclass clazz) {
+    jlong v[5];
+    jlongArray out;
+
+    (void)clazz;
+    v[0] = (jlong)gctr_calls;
+    v[1] = (jlong)gctr_declined;
+    v[2] = (jlong)gctr_bytes;
+    v[3] = (jlong)ghash_calls;
+    v[4] = (jlong)ghash_blocks;
+
+    if ((out = (*env)->NewLongArray(env, 5)) != NULL) {
+        (*env)->SetLongArrayRegion(env, out, 0, 5, v);
+    }
+    return out;
+}
+
+/*
  * GF(2^128) multiply, GCM's reduction polynomial, bit-reflected as the spec
  * has it: the "leftmost" bit of the block is bit 0 of the field element, which
  * is why the reduction constant is 0xe1000... at the TOP of the low word and
@@ -161,6 +194,9 @@ Java_com_sun_crypto_provider_GHASH_processBlocks(JNIEnv *env, jclass clazz,
     st[1]   = (uint64_t)st_j[1];
     subH[0] = (uint64_t)subH_j[0];
     subH[1] = (uint64_t)subH_j[1];
+
+    ghash_calls++;
+    ghash_blocks += (unsigned long)blocks;
 
     for (i = 0; i < blocks; i++) {
         const unsigned char *p = (const unsigned char *)bytes + inOfs + i * 16;
@@ -617,21 +653,26 @@ Java_com_sun_crypto_provider_GCTR_updateNative(JNIEnv *env, jclass clazz,
     int rounds;
 
     (void)clazz;
+    gctr_calls++;
 
     if (keyArr == NULL || counterArr == NULL || inArr == NULL || outArr == NULL) {
+        gctr_declined++;
         return -1;
     }
     if (inLen <= 0 || inLen % 16 != 0 || inOfs < 0 || outOfs < 0) {
+        gctr_declined++;
         return -1;
     }
 
     keyLen = (*env)->GetArrayLength(env, keyArr);
     if (keyLen != 16 && keyLen != 24 && keyLen != 32) {
+        gctr_declined++;
         return -1;
     }
     if ((*env)->GetArrayLength(env, counterArr) != 16
             || (*env)->GetArrayLength(env, inArr) - inOfs < inLen
             || (*env)->GetArrayLength(env, outArr) - outOfs < inLen) {
+        gctr_declined++;
         return -1;
     }
 
@@ -643,16 +684,19 @@ Java_com_sun_crypto_provider_GCTR_updateNative(JNIEnv *env, jclass clazz,
     (*env)->GetByteArrayRegion(env, counterArr, 0, 16, (jbyte *)counter);
 
     if ((rounds = expandKey(key, keyLen, rk)) == 0) {
+        gctr_declined++;
         return -1;
     }
 
     /* Critical on both: one TLS record is up to 16KB, and copying it twice
        would hand back a good part of what the C loop just won. */
     if ((inp = (*env)->GetPrimitiveArrayCritical(env, inArr, NULL)) == NULL) {
+        gctr_declined++;
         return -1;
     }
     if ((outp = (*env)->GetPrimitiveArrayCritical(env, outArr, NULL)) == NULL) {
         (*env)->ReleasePrimitiveArrayCritical(env, inArr, inp, JNI_ABORT);
+        gctr_declined++;
         return -1;
     }
 
@@ -689,5 +733,6 @@ Java_com_sun_crypto_provider_GCTR_updateNative(JNIEnv *env, jclass clazz,
     memset(key, 0, sizeof(key));
     memset(rk, 0, sizeof(rk));
     memset(keystream, 0, sizeof(keystream));
+    gctr_bytes += (unsigned long)inLen;
     return inLen;
 }

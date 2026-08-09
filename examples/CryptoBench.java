@@ -53,6 +53,8 @@ public class CryptoBench {
         run("AES-256-CBC", "AES/CBC/NoPadding", 256, false, mb);
 
         System.out.println();
+        System.out.println(cryptoStats());
+        System.out.println();
         System.out.println("GCM vs CBC is the cost of GHASH; the absolute rate");
         System.out.println("is the ceiling for anything over https.");
     }
@@ -100,6 +102,31 @@ public class CryptoBench {
             return "Java (stock) -- loaded from " + whereFrom();
         } catch (Throwable t) {
             return "unknown (" + t + ")";
+        }
+    }
+
+    /*
+     * What the natives did, not merely whether they exist.
+     *
+     * "declined" is the number that decides the next move.  High, and the
+     * native is entered and refuses -- an argument shape it does not accept,
+     * and the Java loop silently does the work.  Zero with the byte count
+     * matching the data, and the native handled everything, which would mean
+     * the time was never in AES and looking harder at the cipher is wasted.
+     */
+    private static String cryptoStats() {
+        try {
+            long[] s = (long[]) Class.forName("java.lang.AmigaDiag")
+                                     .getMethod("cryptoStats").invoke(null);
+            if (s == null || s.length < 5) {
+                return "crypto natives: no counters";
+            }
+            return "GCTR  calls=" + s[0] + " declined=" + s[1]
+                 + " bytes=" + s[2] + "\n"
+                 + "GHASH calls=" + s[3] + " blocks=" + s[4]
+                 + " (" + (s[4] * 16) + " bytes)";
+        } catch (Throwable t) {
+            return "crypto natives: not this runtime";
         }
     }
 
