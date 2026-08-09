@@ -5,11 +5,13 @@ All notable changes to Java-OS4. Versions are AmigaOS 4 `.lha` releases on the
 runtime for AmigaOS 4 (PowerPC): JamVM 2.0 + the OpenJDK 8 class library + a native
 `sun.awt.amiga` AWT/Swing toolkit.
 
-## 0.6.0 — 2026-08-07
+## 0.6.0 — 2026-08-09
 
 The release where a real application runs. Networking, TLS, colour management
 and the AmigaOS path model all arrived or were rebuilt; the interpreter stopped
-being the slowest one JamVM offers.
+being the slowest one JamVM offers. Then the parts that worked were made fast
+enough to use: an https download went from 140 KB/s to 1.7 MB/s, and external
+processes started at all.
 
 **Added**
 
@@ -40,7 +42,35 @@ being the slowest one JamVM offers.
   but `:` is what everyone types, so each one is now resolved against the
   AmigaDOS device list: `Work:` is a volume, `app.jar:` is a separator. `*` and
   `dir/*` expand to the jars in that drawer, which no AmigaOS shell does.
-- Examples `NetTest` (walks the java.net layers bottom-up) and `NetDownload`.
+- **`Runtime.exec` and `ProcessBuilder`** — previously impossible and documented
+  as such: clib4 has neither `fork` nor `vfork`, and OpenJDK's `UNIXProcess`
+  wants both. It is now built on clib4's `spawnvpe`, which is what AmigaOS
+  actually offers, with a `Platform.AMIGAOS` arm in `UNIXProcess` that replaces
+  the `sigchld`-driven reaper with a bounded wait. Redirection, exit codes,
+  `destroy()` and both output streams work. Examples `ExecTest` and `ExecLeak`.
+- **Crypto in C, where TLS spends its time** — there is no JIT, so none of
+  HotSpot's crypto intrinsics exist and every cipher ran as bytecode. The four
+  methods HotSpot would intrinsify are now native: `GHASH.processBlocks`,
+  `GCTR.update`, `SHA2`/`SHA5.implCompress`. AES-GCM went from **506 to 6311
+  KB/s**, a factor of twelve, and https from 140 KB/s to 1.7 MB/s. `CryptoBench`
+  measures it and reports call counters, not merely whether a method carries the
+  native flag — see the Fixed entry below for why that distinction was expensive.
+- **Faster startup** — `SecureRandom` seeded from clib4's `getentropy()` instead
+  of the threaded fallback that races threads against each other to harvest
+  scheduling jitter. Worth 25-30 seconds off **every** JVM start; what remains
+  is ~11s of provider registration and 118 CA certificates parsed interpreted.
+- **Socket defaults worth having** — `TCP_NODELAY` on, and send/receive buffers
+  sized for a real link rather than left at the handler's default. Doubled plain
+  http throughput on its own.
+- `libbz2.so` and `libbrotli*.so` are shipped, so freetype's optional paths
+  resolve instead of being left dangling.
+- Examples `NetTest` (walks the java.net layers bottom-up) and `NetDownload`,
+  which reports the **spread** and stall count alongside the average: a transfer
+  averaging 1 MB/s by alternating 250 KB/s and 2 MB/s is not a slow transfer but
+  a stalling one, and the two have different causes. That distinction is what
+  identified the collector below.
+- [`docs/TODO.md`](docs/TODO.md) — the known gaps, each written up from the
+  diagnosis rather than the symptom, so the next person does not start over.
 - Host unit tests for the path conversion and the classpath rewriter, compiled
   against the shipped headers and run by the native build, plus a sweep in
   packaging that reports any symbol a shipped `.so` needs and nothing provides.
@@ -71,6 +101,65 @@ being the slowest one JamVM offers.
   min == max == 16MB. Physical memory is now reported for real, and the startup
   mapping halves and retries rather than aborting, which is what forced the fake
   figure in the first place.
+- **`-Dfoo=bar` never reached the VM** — no system property could be set without
+  quoting it, on a runtime where every tuneable *is* a system property. The
+  `java` launcher was an AmigaDOS script, so its command line went through
+  ReadArgs, and ReadArgs treats `=` as an argument separator: `-Dfoo=bar`
+  arrived as `-Dfoo` and `bar`, and since the first non-option token is the main
+  class, the VM went looking for a class named after the value —
+  `-Djava.security.debug=provider` → `ClassNotFoundException: provider`. That
+  silently included the `sun.nio.fs.chdirAllowed` BUILDING.md tells people to
+  pass, which had therefore never once arrived. `java` is now a real program
+  ([`src/launcher/java.c`](src/launcher/java.c)) that hands argv to the VM as an
+  array, so nothing re-parses it. Two things fell out of doing it properly: it
+  no longer leaves `LD_LIBRARY_PATH` and `JAVA_HOME` set **globally** in `ENV:`
+  after exiting (AmigaDOS `SetEnv` is system-wide and persistent), and it
+  returns the VM's own exit code, so scripts testing `$RC` get a real answer.
+- **Threads could not be stopped, so exiting killed them** — `pthread_kill`
+  cannot interrupt a thread running bytecode on AmigaOS, so the VM had been
+  taking threads down from outside. That crashed in `pthread 6` on every clean
+  exit. JamVM's cooperative safepoints are restored instead: the interpreter
+  polls `suspend_pending_count` at method entry, taken branches and returns, and
+  a thread leaves through `exitDetachAndDie()` on its own. This also fixed a
+  latent hang nobody had hit yet — stop-the-world GC used the same mechanism, so
+  it could wait forever on a thread that was never going to answer. The poll is
+  declared next to the engine-variant selection, so adding an engine cannot
+  silently drop it.
+- **The heap never grew, and the download oscillated because of it** — separate
+  from the 16MB ceiling below. `expandHeap()` is reached only after a collection
+  that *still* could not satisfy the allocation which triggered it, which never
+  happens with a healthy live set, so the heap stays at `min_heap` for the life
+  of the VM: `min_heap` is the working size, not a starting size. The default
+  was `phys_mem/64` — HotSpot's ratio for the *initial* heap, copied without the
+  policy that has HotSpot raise it. TLS allocates about seven bytes per byte
+  transferred, so a 77MB download collected **40 times**, once every two
+  seconds, and swung between 250 KB/s and 2 MB/s. Now `phys_mem/8` capped at
+  256MB: the same download collects twice, runs 44s instead of 78, and holds
+  1.3-1.8 MB/s with no sample below a quarter of peak.
+- **Exec left ~30 `PIPE:` handles open per run** — the DOS handles survived the
+  process, so the jars could not be replaced afterwards. Three causes, found
+  only by counting: the parent's own pipe ends were inherited by the child
+  (clib4's `build_fd_inherit_spec` passes every descriptor without `FD_CLOEXEC`);
+  the streams were drained with a blocking read that could not finish; and
+  `available()` reported nonsense on a pipe, which also produced
+  `OutOfMemoryError` in the process reaper. `FIONREAD` was implemented in clib4
+  for the third — the patch is upstream.
+- **`Runtime.exec` opened a requester for `/T:`** — the program and working
+  directory were handed to DOS unconverted, so a Unix-form path arrived where an
+  AmigaOS one was expected.
+- **Symbols went unresolved across shipped libraries** — `GetNativePrim` in
+  `libfontmanager`, `registerAmigaAwtCleanup` in `libamigaawt`. The JDK's native
+  libraries expect to share one symbol namespace; they were being loaded
+  privately. Now `RTLD_GLOBAL`.
+- **A native method that was never called still reports as native** — three
+  builds reported accelerated AES from reflection while the Java loop did all
+  the work. A native binds only to libraries owned by its own class loader
+  (`ClassLoader.findNative`, no fallback to the system list), and `GCTR` comes
+  from the extension loader while the library was in `libjava.so`; the
+  `UnsatisfiedLinkError` was then swallowed by a `catch (Throwable)`. Asking
+  whether a method *is* native is not asking whether that native *runs*. The
+  native lives in its own `libamigacrypto.so` now, loaded by the class that uses
+  it, and failure is reported once and loudly rather than caught.
 - **`libsunec.so` needed `libstdc++.so`**, which is not shipped: the AmigaOS ELF
   loader failed it with *"Unresolved symbol: __gthread_mutex_destroy"*. Linked
   statically, so those references are absent rather than merely satisfied.
@@ -96,9 +185,13 @@ being the slowest one JamVM offers.
   and a candidate fix.
 - `libmanagement.so` is not built, so `ManagementFactory.getRuntimeMXBean()`
   throws `UnsatisfiedLinkError`.
-- `java.lang.ProcessBuilder` cannot work: clib4 has neither `fork` nor `vfork`.
-- `libfontmanager` leaves freetype's optional PNG, bzip2 and WOFF2 paths
-  unresolved; they are unreachable with the fonts shipped.
+- `file:/RANDOM:` cannot be opened through Java's `file:` URL layer, although
+  `RANDOM:` is a perfectly real AmigaOS device that `open()` reads without
+  complaint. Worked around by seeding from `getentropy()`.
+- AES-CBC is still interpreted (`AESCrypt.encryptBlock`,
+  `CipherBlockChaining.implEncrypt`). It does not currently matter — the
+  negotiated GCM suites are native, and the cipher is no longer the bottleneck —
+  but it would if a CBC-only peer were ever on the other end.
 
 ## 0.5.4 — 2026-06-23
 

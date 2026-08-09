@@ -169,6 +169,46 @@ ppc-amigaos-gcc -mcrt=clib4 -use-dynld -athread=native -Wl,-rpath=JAVA:Sobjs \
     -o "$DEST/jamvm-openjdk" "$JAMO" "$OUT/verstag.o" -L"$DEST" -ljvm \
     -lpthread -lm -lrt -lz -lauto
 echo "LINK OK"
-ls -la "$DEST/libjvm.so" "$DEST/jamvm-openjdk"
+
+# The `java` launcher (src/launcher/java.c), which replaced the AmigaDOS script
+# whose ReadArgs template ate '=' out of every -Dfoo=bar.
+#
+# STATIC, deliberately -- no -use-dynld here.  This program's whole job is to set
+# LD_LIBRARY_PATH before the VM's loader runs, so it must be able to start when
+# LD_LIBRARY_PATH is not yet set.  Linked against the clib4 sobjs it would need
+# Sobjs/libc.so to be found in order to run the code that says where Sobjs is.
+# The check below fails the build rather than shipping that circle.
+# Host self-test first: it checks WHICH arguments reach the VM, which is the one
+# thing here that can be wrong without looking wrong (a stray leading token is
+# invisible whenever a real main class follows it).
+if command -v cc >/dev/null 2>&1; then
+    if cc -O1 -Wall -o "$OUT/test-java-launcher" \
+          "$PROJECT_ROOT/tools/test-java-launcher.c" 2>"$OUT/e"; then
+        "$OUT/test-java-launcher" >/dev/null || {
+            echo "FATAL: java launcher self-test FAILED"
+            "$OUT/test-java-launcher"
+            exit 1
+        }
+        echo "=== java launcher self-test PASSED ==="
+    else
+        echo "WARN: host-compile of test-java-launcher.c failed; skipping self-test"
+        head -3 "$OUT/e"
+    fi
+fi
+
+echo "=== compiling java launcher (static) ==="
+ppc-amigaos-gcc -mcrt=clib4 -O2 -Wall -Wextra \
+    -DJAVAOS4_VER="\"$PVER\"" -DJAVAOS4_JAVAVER="\"$JVER\"" \
+    -DJAVAOS4_DATE="\"$JDATE\"" \
+    -o "$DEST/java" "$PROJECT_ROOT/src/launcher/java.c"
+
+if ppc-amigaos-readelf -d "$DEST/java" 2>/dev/null | grep -qi "NEEDED"; then
+    echo "ERROR: the java launcher has dynamic dependencies; it must be static." >&2
+    ppc-amigaos-readelf -d "$DEST/java" | grep -i "NEEDED" >&2
+    exit 1
+fi
+echo "  java OK ($(wc -c < "$DEST/java") bytes, no DT_NEEDED)"
+
+ls -la "$DEST/libjvm.so" "$DEST/jamvm-openjdk" "$DEST/java"
 echo "=== libjvm.so exports JVM_* ? ==="
 ppc-amigaos-readelf --dyn-syms "$DEST/libjvm.so" 2>/dev/null | grep -cE "JVM_"

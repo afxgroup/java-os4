@@ -46,20 +46,27 @@ mkdir -p "$RT/lib/fonts" "$SOBJ"
 cp "$B/jamvm-openjdk" "$RT/jamvm-openjdk"
 cp "$B/libjvm.so"     "$RT/"
 
-# `java` launcher.  It does NOT change directory: the VM finds its own runtime
-# (boot jars, java.home, native libs) relative to PROGDIR: -- jamvm-openjdk's own
-# directory -- so the caller's shell cwd is left untouched and the user's
-# relative -cp resolves against THEIR directory.  LD_LIBRARY_PATH="PROGDIR:Sobjs"
-# points the ELF loader at the bundled clib4/support sobjs in Sobjs/ regardless of cwd.
-{
-    echo ".KEY args/F"
-    echo ".BRA {"
-    echo ".KET }"
-    echo ";\$VER: Java-OS4 $PVER ($DATE) OpenJDK $JVER"
-    echo 'SetEnv LD_LIBRARY_PATH "PROGDIR:Sobjs"'
-    echo 'SetEnv JAVA_HOME "JAVA:"'
-    echo "JAVA:jamvm-openjdk {args}"
-} > "$RT/java"
+# `java` launcher -- a real program (src/launcher/java.c), not the AmigaDOS
+# script this used to be.  The script's `.KEY args/F` template meant ReadArgs
+# parsed the command line, and ReadArgs treats '=' as an argument separator, so
+# `-Dfoo=bar` arrived at the VM split in two and the value was read as the main
+# class name.  No system property could be set without quoting it.
+#
+# It still does NOT change directory: the VM finds its own runtime (boot jars,
+# java.home, native libs) relative to PROGDIR: -- its own directory -- so the
+# caller's shell cwd is left untouched and the user's relative -cp resolves
+# against THEIR directory.  It sets LD_LIBRARY_PATH=PROGDIR:Sobjs for the child
+# only, via setenv() rather than the script's `SetEnv`, which wrote to ENV: and
+# left the variable set system-wide after java had exited.
+#
+# JAVA_HOME is not set at all any more: nothing in the VM reads it (java.home
+# comes from getJavaHome()), so the old line was decorative -- and it too was a
+# global SetEnv.
+if [ ! -s "$B/java" ]; then
+    echo "ERROR: build/java missing -- run tools/build-jamvm-openjdk.sh first" >&2
+    exit 1
+fi
+cp "$B/java" "$RT/java"
 
 # --- runtime: OpenJDK + AWT natives ---------------------------------------
 for so in libjava libverify libzip libnio libnet libsunec libamigacrypto \

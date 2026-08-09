@@ -3,51 +3,27 @@
 Things deliberately left, so the next person starts from the diagnosis rather
 than from the symptom.
 
-## The `java` launcher eats `=`
+## The `java` launcher: done, and the one thing to not undo
 
-`java -Dfoo=bar ...` arrives at the VM as two arguments, `-Dfoo` and `bar`, so
-the first non-option token becomes the main class:
+Was an AmigaDOS script whose `.KEY args/F` template put the command line through
+ReadArgs, which treats `=` as an argument separator -- so `-Dfoo=bar` reached the
+VM as two arguments and the value was read as the main class name. Now
+[`src/launcher/java.c`](../src/launcher/java.c), which passes argv as an array.
 
-```
-java -Djava.security.debug=provider -cp x.jar Main
-    -> ClassNotFoundException: provider
-```
+Two things worth not rediscovering:
 
-**Not JamVM.** `init.c` parses `-D` correctly -- takes everything after `-D`,
-finds the `=`, splits. The damage is upstream, in the launcher, which is an
-AmigaDOS script:
+- **The launcher must stay statically linked.** Its job is to set
+  `LD_LIBRARY_PATH` before the VM's loader runs, so it has to start when
+  `LD_LIBRARY_PATH` is *not* set. Linked against the clib4 sobjs it would need
+  `Sobjs/libc.so` in order to run the code that says where `Sobjs` is. The build
+  fails on any `DT_NEEDED` rather than shipping that circle.
+- **`spawnv`, not `system`.** `system()` takes a string, which would mean
+  concatenating argv and quoting it for the DOS shell by hand -- rebuilding the
+  layer whose mis-parsing the program exists to fix. `spawnv` takes an array and
+  clib4 quotes it once, correctly, in `build_arg_string()`.
 
-```
-.KEY args/F
-.BRA {
-.KET }
-SetEnv LD_LIBRARY_PATH "PROGDIR:Sobjs"
-SetEnv JAVA_HOME "JAVA:"
-JAVA:jamvm-openjdk {args}
-```
-
-ReadArgs treats `=` as an argument separator, so it never survives `args/F`.
-
-**Workaround that works today:** quote it.
-
-```
-java "-Djava.security.debug=provider" -cp x.jar Main
-```
-
-This matters more than a debug flag. Everything tuneable is a system property:
-`jdk.tls.client.cipherSuites` (worth ~4.8x on TLS throughput, since the CBC
-suites skip GHASH), `jdk.tls.client.protocols`, `sun.nio.fs.chdirAllowed` --
-which BUILDING.md tells people to pass, and which has never actually arrived.
-
-**The fix:** a real `java` in C that hands argv to the VM untouched. Two things
-already checked, so it should be small:
-
-- `JAVA_HOME` is read by nothing in the VM. `java.home` comes from
-  `getJavaHome()`. The line is decorative.
-- Every shipped `.so` carries `-Wl,-rpath=JAVA:Sobjs`, an absolute path, so
-  `LD_LIBRARY_PATH` is only doing work for a runtime installed somewhere other
-  than `JAVA:`. If that case does not need supporting, `java` could simply be a
-  copy of `jamvm-openjdk` and the problem disappears with the script.
+`tools/test-java-launcher.c` compiles the launcher for the host with `spawnv`
+replaced by a recorder and asserts on what it was handed; the build runs it.
 
 ## `file:/RANDOM:` cannot be opened through Java
 
