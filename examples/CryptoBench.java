@@ -44,6 +44,7 @@ public class CryptoBench {
                            + " " + System.getProperty("os.version")
                            + ", " + mb + " MB per cipher");
         System.out.println("GHASH: " + ghashKind());
+        System.out.println("GCTR : " + gctrKind());
         System.out.println();
 
         run("AES-128-GCM", "AES/GCM/NoPadding", 128, true,  mb);
@@ -72,6 +73,44 @@ public class CryptoBench {
                    ? "native (amiga_crypto.c)" : "Java (stock)";
         } catch (Throwable t) {
             return "unknown (" + t + ")";
+        }
+    }
+
+    /*
+     * Whether counter mode is accelerated, and -- when it is not -- which jar
+     * the class came from.
+     *
+     * The first run after the native landed showed no change at all, and the
+     * bench could not say why: it reported GHASH and nothing else.  GCTR comes
+     * from lib/ext/sunjce_provider.jar, which the build patches in place, so
+     * "not native" here almost always means the runtime is loading a jar from
+     * somewhere other than where the release put it.  Printing the location
+     * turns that from a guess into a fact.
+     */
+    private static String gctrKind() {
+        try {
+            Class<?> c = Class.forName("com.sun.crypto.provider.GCTR");
+            java.lang.reflect.Method m =
+                c.getDeclaredMethod("updateNative", byte[].class, byte[].class,
+                                    byte[].class, int.class, int.class,
+                                    byte[].class, int.class);
+            return java.lang.reflect.Modifier.isNative(m.getModifiers())
+                   ? "native (amiga_crypto.c)" : "Java (stock)";
+        } catch (NoSuchMethodException e) {
+            return "Java (stock) -- loaded from " + whereFrom();
+        } catch (Throwable t) {
+            return "unknown (" + t + ")";
+        }
+    }
+
+    private static String whereFrom() {
+        try {
+            java.security.CodeSource cs =
+                Class.forName("com.sun.crypto.provider.GCTR")
+                     .getProtectionDomain().getCodeSource();
+            return cs == null ? "the boot class path" : String.valueOf(cs.getLocation());
+        } catch (Throwable t) {
+            return "somewhere unreadable (" + t + ")";
         }
     }
 
