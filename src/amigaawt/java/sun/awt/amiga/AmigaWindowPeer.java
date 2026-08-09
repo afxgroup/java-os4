@@ -70,6 +70,26 @@ class AmigaWindowPeer implements WindowPeer {
     private int width, height;
     private int lastSentX = Integer.MIN_VALUE, lastSentY = Integer.MIN_VALUE;
 
+    /*
+     * Set while the EDT is applying a position that came FROM Intuition, so the
+     * setBounds it causes does not send that position straight back.
+     *
+     * Comparing against lastSentX/Y was not enough, and the gap only opens when
+     * the EDT falls behind -- which is exactly when someone is dragging a window
+     * on a busy machine.  handleNativeMove runs on the event pump: it updates
+     * lastSentX/Y immediately and queues target.setLocation for later.  Drag
+     * through P1 then P2 and the pump has already recorded P2 by the time the
+     * EDT runs the echo for P1; setBounds then sees P1 != P2, concludes the
+     * application wants the window at P1, and moves it BACK.  The echo for P2
+     * moves it forward again, so the window flicks between old and new positions
+     * for as long as the queue is behind, and settles wherever the last echo
+     * happens to land.
+     *
+     * EDT-only, because both the write here and the setBounds that reads it
+     * happen inside one target.setLocation call on the event dispatch thread.
+     */
+    private boolean applyingNativeMove;
+
     /** real inner-origin screen position (winpos0 at open, EV_MOVE after) */
     volatile int screenX, screenY;
 
@@ -213,7 +233,8 @@ class AmigaWindowPeer implements WindowPeer {
            setBounds after open merely adopts Java's (insets-normalized) idea
            of the location -- the native window was placed by open0, and Java
            never knew that position; moving here would yank it to (0,~32). */
-        if (handle != 0 && (x != lastSentX || y != lastSentY)) {
+        if (handle != 0 && !applyingNativeMove
+                && (x != lastSentX || y != lastSentY)) {
             boolean first = (lastSentX == Integer.MIN_VALUE);
             lastSentX = x;
             lastSentY = y;
@@ -242,6 +263,7 @@ class AmigaWindowPeer implements WindowPeer {
         java.awt.EventQueue.invokeLater(new Runnable() {
             @Override
             public void run() {
+                applyingNativeMove = true;
                 try {
                     target.setLocation(x, y);
                     /* Component.reshape skips ComponentEvents for top-level
@@ -250,6 +272,10 @@ class AmigaWindowPeer implements WindowPeer {
                         target, java.awt.event.ComponentEvent.COMPONENT_MOVED));
                 } catch (Throwable t) {
                     System.out.println("[MOV] move sync failed: " + t);
+                } finally {
+                    /* In a finally: leaving this set would silently stop the
+                       application from ever moving the window again. */
+                    applyingNativeMove = false;
                 }
             }
         });
