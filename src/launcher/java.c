@@ -132,11 +132,73 @@ static int program_dir(char *buf, size_t size) {
     return 0;
 }
 
+/*
+ * Drop the last component: "Work:Java/bin" -> "Work:Java", "Work:Java" ->
+ * "Work:".  Zero when there is nothing left to drop, so a caller cannot loop
+ * forever on a volume root.
+ */
+static int parent_dir(char *dir) {
+    char *slash = strrchr(dir, '/');
+
+    if(slash != NULL) {
+        *slash = '\0';
+        return 1;
+    }
+
+    /* No '/', so we are at "Volume:something" -- the parent is the volume. */
+    {
+        char *colon = strchr(dir, ':');
+
+        if(colon != NULL && colon[1] != '\0') {
+            colon[1] = '\0';
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int have_vm_in(const char *dir) {
+    char candidate[512];
+
+    join_path(candidate, sizeof(candidate), dir, VM_BINARY);
+    return access(candidate, F_OK) == 0;
+}
+
+/*
+ * Find the runtime, which is not always in the directory this program is in.
+ *
+ * A JRE keeps its launcher in bin/ -- $JAVA_HOME/bin/java -- and applications
+ * build that path themselves rather than asking.  InvoiceX's auto-updater does
+ * exactly this:
+ *
+ *     autoupdate eseguo [Work:Java/bin/java, -cp, ...]
+ *
+ * and it was right; we were the ones not laying out like a JRE.  So `java` now
+ * ships in bin/ as well as at the top, and the same binary has to work from
+ * both: from bin/ the VM is one level up.
+ *
+ * Checked by looking for the VM rather than by testing whether the directory is
+ * called "bin", because the question that matters is where the runtime is, not
+ * what the drawer is named.
+ */
 static void resolve_paths(void) {
     char dir[400];
 
     if(!program_dir(dir, sizeof(dir))) {
         snprintf(dir, sizeof(dir), "%s", FALLBACK_HOME);
+    }
+
+    if(!have_vm_in(dir)) {
+        char up[400];
+
+        snprintf(up, sizeof(up), "%s", dir);
+        if(parent_dir(up) && have_vm_in(up)) {
+            snprintf(dir, sizeof(dir), "%s", up);
+        } else if(!have_vm_in(dir)) {
+            /* Neither: fall back to the installed location, so the error names
+               somewhere a user can check rather than wherever we happen to be. */
+            snprintf(dir, sizeof(dir), "%s", FALLBACK_HOME);
+        }
     }
 
     join_path(vm_program, sizeof(vm_program), dir, VM_BINARY);

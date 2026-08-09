@@ -21,6 +21,7 @@
 #include <proto/exec.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
+#include <proto/utility.h>
 #include <proto/keymap.h>
 
 #include <string.h>
@@ -37,27 +38,74 @@ struct Library *KeymapBase = NULL;
 struct IntuitionIFace *IIntuition = NULL;
 struct GraphicsIFace *IGraphics = NULL;
 struct KeymapIFace *IKeymap = NULL;
+struct UtilityIFace *IUtility = NULL;
+struct UtilityBase *UtilityBase = NULL;
+struct Library *ASLBase = NULL;
+struct ASLIFace *IASL = NULL;
 
 static APTR windowMutex = NULL;  /* for the open-window registry */
 
 static int ensure_libs(void) {
-    if (IIntuition != NULL && IGraphics != NULL)
+    if (IIntuition != NULL && IGraphics != NULL && IUtility != NULL)
         return 1;
-    IntuitionBase = (struct IntuitionBase *)
-        IExec->OpenLibrary("intuition.library", 51);
+
+    IntuitionBase = (struct IntuitionBase *) IExec->OpenLibrary("intuition.library", 51);
     GfxBase = (struct GfxBase *)IExec->OpenLibrary("graphics.library", 51);
-    if (IntuitionBase == NULL || GfxBase == NULL)
+    UtilityBase = (struct UtilityBase *) IExec->OpenLibrary("utility.library", 51);
+    ASLBase = (struct Library *) IExec->OpenLibrary("asl.library", 51);
+    if (IntuitionBase == NULL || GfxBase == NULL || UtilityBase == NULL || ASLBase == NULL)
         return 0;
-    IIntuition = (struct IntuitionIFace *)
-        IExec->GetInterface((struct Library *)IntuitionBase, "main", 1, NULL);
-    IGraphics = (struct GraphicsIFace *)
-        IExec->GetInterface((struct Library *)GfxBase, "main", 1, NULL);
+
+    IIntuition = (struct IntuitionIFace *) IExec->GetInterface((struct Library *)IntuitionBase, "main", 1, NULL);
+    IGraphics = (struct GraphicsIFace *) IExec->GetInterface((struct Library *)GfxBase, "main", 1, NULL);
+    IUtility = (struct UtilityIFace *) IExec->GetInterface((struct Library *)UtilityBase, "main", 1, NULL);
+    IASL = (struct ASLIFace *) IExec->GetInterface((struct Library *)ASLBase, "main", 1, NULL);
+
     /* keymap is optional (chars degrade to 0 without it) */
     KeymapBase = IExec->OpenLibrary("keymap.library", 51);
     if (KeymapBase != NULL)
-        IKeymap = (struct KeymapIFace *)
-            IExec->GetInterface(KeymapBase, "main", 1, NULL);
-    return IIntuition != NULL && IGraphics != NULL;
+        IKeymap = (struct KeymapIFace *) IExec->GetInterface(KeymapBase, "main", 1, NULL);
+
+    return IIntuition != NULL && IGraphics != NULL && IUtility != NULL && IASL != NULL;
+}
+
+static void close_libs() {
+    if (IASL != NULL) {
+        IExec->DropInterface((struct Interface *)IASL);
+        IASL = NULL;
+    }
+    if (ASLBase != NULL) {
+        IExec->CloseLibrary((struct Library *)ASLBase);
+        ASLBase = NULL;
+    }
+    if (IIntuition != NULL) {
+        IExec->DropInterface((struct Interface *)IIntuition);
+        IIntuition = NULL;
+    }
+    if (IUtility != NULL) {
+        IExec->DropInterface((struct Interface *)IUtility);
+        IUtility = NULL;
+    }
+    if (IKeymap != NULL) {
+        IExec->DropInterface((struct Interface *)IKeymap);
+        IKeymap = NULL;
+    }
+    if (IntuitionBase != NULL) {
+        IExec->CloseLibrary((struct Library *)IntuitionBase);
+        IntuitionBase = NULL;
+    }
+    if (GfxBase != NULL) {
+        IExec->CloseLibrary((struct Library *)GfxBase);
+        GfxBase = NULL;
+    }
+    if (UtilityBase != NULL) {
+        IExec->CloseLibrary((struct Library *)UtilityBase);
+        UtilityBase = NULL;
+    }
+    if (KeymapBase != NULL) {
+        IExec->CloseLibrary((struct Library *)KeymapBase);
+        KeymapBase = NULL;
+    }
 }
 
 /* event type codes shared with the Java side */
@@ -87,8 +135,10 @@ static int ensure_libs(void) {
  * them.  This is the safety net for the EXIT_ON_CLOSE path that skips
  * dispose(); the normal dispose()/close0() path unregisters first. */
 #define MAX_AWT_WINDOWS 64
+
 static struct Window *g_windows[MAX_AWT_WINDOWS];
 static int g_atexit_registered = 0;
+static uint32 cur_x, cur_y;  /* last mouse position (for EV_MOUSE_MOVE) */
 
 static void awt_atexit_cleanup(void)
 {
@@ -107,6 +157,7 @@ static void awt_atexit_cleanup(void)
             IIntuition->CloseWindow(win);
         }
     }
+    close_libs();
 }
 
 static void register_window(struct Window *win)
@@ -174,7 +225,7 @@ static jlong do_open(JNIEnv *env, jint w, jint h, jstring title, int sizable)
         WA_MaxWidth,      ~0,
         WA_MaxHeight,     ~0,
         WA_Activate,      TRUE,
-        WA_SimpleRefresh, TRUE,
+        //WA_SimpleRefresh, TRUE,
         WA_IDCMP,         IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS |
                           IDCMP_MOUSEMOVE | IDCMP_RAWKEY |
                           IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW |
@@ -204,9 +255,24 @@ static void do_blit(JNIEnv *env, jlong handle, jintArray pixels,
         return;
 
     /* ARGB32 rows -> the window's (GimmeZeroZero) rastport */
+#if 0    
     IGraphics->WritePixelArray((uint8 *)px, x, y, stride * 4,
                                PIXF_A8R8G8B8, win->RPort,
                                x, y, w, h);
+#else
+    IGraphics->BltBitMapTags(
+        BLITA_Source,         px,
+        BLITA_SrcType,        BLITT_ARGB32,
+        BLITA_Dest,           win->RPort,
+        BLITA_DestType,       BLITT_RASTPORT,
+        BLITA_UseSrcAlpha,    TRUE,
+        BLITA_Width,          w,
+        BLITA_Height,         h,
+        BLITA_DestX,          0,
+        BLITA_DestY,          0,
+        BLITA_SrcBytesPerRow, stride * 4,
+        TAG_END);
+#endif
 
     (*env)->ReleasePrimitiveArrayCritical(env, pixels, px, JNI_ABORT);
 }
@@ -234,15 +300,20 @@ static jint do_poll(JNIEnv *env, jlong handle, jintArray out, int n)
     vals[3] = msg->Qualifier;
 
     switch (msg->Class) {
-        case IDCMP_CLOSEWINDOW:  type = EV_CLOSE; break;
+        case IDCMP_CLOSEWINDOW:  
+            type = EV_CLOSE; 
+            break;
         case IDCMP_MOUSEBUTTONS:
         case IDCMP_MOUSEMOVE:
             /* IntuiMessage MouseX/Y are WINDOW-relative (even for GZZ
                windows) -- convert to inner-relative for the Java side */
             vals[1] = msg->MouseX - win->BorderLeft;
             vals[2] = msg->MouseY - win->BorderTop;
-            if (msg->Class == IDCMP_MOUSEMOVE)
+            if (msg->Class == IDCMP_MOUSEMOVE) {
                 type = EV_MOUSE_MOVE;
+                cur_x = vals[1];
+                cur_y = vals[2];
+            }
             else
                 type = (msg->Code & IECODE_UP_PREFIX) ? EV_MOUSE_UP
                                                       : EV_MOUSE_DOWN;
@@ -300,11 +371,12 @@ static void do_close(jlong handle)
     STRPTR ttl;
     if (win == NULL)
         return;
+    
     unregister_window(win);
     ttl = win->Title;   /* our AllocVec copy (open or settitle) */
     IIntuition->CloseWindow(win);
     if (ttl != NULL)
-        IExec->FreeVec(ttl);
+        IExec->FreeVec(ttl);           
 }
 
 /* ------------- legacy M3 exports (class AmigaWindow, out[4]) ------------- */
@@ -380,6 +452,35 @@ Java_sun_awt_amiga_AmigaNative_screensize0(JNIEnv *env, jclass cls)
         IIntuition->UnlockPubScreen(NULL, scr);
     }
     return r;
+}
+
+/*
+ * Pointer position on the Workbench screen.
+ *
+ * Screen->MouseX/MouseY are screen-relative and already what MouseInfo wants;
+ * the IntuiMessage MouseX/MouseY used by poll0() are WINDOW-relative and are a
+ * different quantity, which is why this reads the screen rather than reusing
+ * the event path.
+ *
+ * x in the high 32 bits, y in the low 32.  The pointer can be outside the
+ * screen, so the coordinates are signed and cannot use the 16-bit packing the
+ * other calls here use.
+ */
+JNIEXPORT jlong JNICALL
+Java_sun_awt_amiga_AmigaNative_mousepos0(JNIEnv *env, jclass cls)
+{
+    struct Screen *scr;
+    jint x = 0, y = 0;
+
+    if (!ensure_libs())
+        return 0;
+    scr = IIntuition->LockPubScreen(NULL);
+    if (scr != NULL) {
+        x = scr->MouseX;
+        y = scr->MouseY;
+        IIntuition->UnlockPubScreen(NULL, scr);
+    }
+    return (((jlong)x) << 32) | (((jlong)y) & 0xFFFFFFFFLL);
 }
 
 /* resize the window so the inner (GZZ) area becomes w x h */

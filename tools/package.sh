@@ -68,6 +68,18 @@ if [ ! -s "$B/java" ]; then
 fi
 cp "$B/java" "$RT/java"
 
+# bin/java as well, because that is where a JRE keeps it.
+#
+# Applications build $JAVA_HOME/bin/java themselves instead of asking -- it is
+# the layout every JRE has -- and InvoiceX's auto-updater did exactly that:
+#
+#     autoupdate eseguo [Work:Java/bin/java, -cp, ...]
+#
+# which was correct, and found nothing.  The same binary serves both places: it
+# looks for the VM beside itself and, failing that, one level up.
+mkdir -p "$RT/bin"
+cp "$B/java" "$RT/bin/java"
+
 # --- runtime: OpenJDK + AWT natives ---------------------------------------
 for so in libjava libverify libzip libnio libnet libsunec libamigacrypto \
           libmanagement libawt libfontmanager libamigaawt liblcms; do

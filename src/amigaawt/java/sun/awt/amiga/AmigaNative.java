@@ -36,6 +36,15 @@ class AmigaNative {
     static native void resize0(long h, int w, int hgt);
     /* inner-origin screen position: (x << 16) | y */
     static native int winpos0(long h);
+    /*
+     * Pointer position on the Workbench screen, x in the high 32 bits and y in
+     * the low 32.  Packed into a long rather than the (x << 16) | y used above
+     * because the pointer can sit outside the screen -- negative, on a dragged
+     * screen -- and 16-bit packing cannot carry a sign.  Returns 0,0 if the
+     * screen cannot be locked, which reads as the top-left corner; MouseInfo
+     * has no way to express "unknown", so the least surprising answer wins.
+     */
+    static native long mousepos0();
     static native void move0(long h, int x, int y);
     static native void settitle0(long h, String title);
     static native void tofront0(long h);

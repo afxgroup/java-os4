@@ -101,6 +101,24 @@ int main(void) {
         check(strcmp(buf, "Work:Java/Sobjs") == 0,
               "join: an existing trailing '/' is not doubled");
 
+        /* Dropping a component, which is how bin/java finds the VM one level
+           up.  Must terminate at a volume root rather than loop. */
+        {
+            char d[128];
+
+            snprintf(d, sizeof(d), "Work:Java/bin");
+            check(parent_dir(d) && strcmp(d, "Work:Java") == 0,
+                  "parent: Work:Java/bin -> Work:Java");
+
+            snprintf(d, sizeof(d), "Work:Java");
+            check(parent_dir(d) && strcmp(d, "Work:") == 0,
+                  "parent: Work:Java -> Work: (the volume)");
+
+            snprintf(d, sizeof(d), "Work:");
+            check(parent_dir(d) == 0,
+                  "parent: Work: has none, and says so instead of looping");
+        }
+
         /* The host cannot ask DOS, so this exercises the fallback. */
         resolve_paths();
         check(strcmp(vm_program, "JAVA:jamvm-openjdk") == 0,

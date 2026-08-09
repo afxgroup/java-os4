@@ -1249,7 +1249,7 @@ index bf88d59..c663143 100644
          MethodBlock *mb = lookupMethod(excep->class, SYMBOL(printStackTrace),
                                                       SYMBOL(___V));
 diff --git a/src/init.c b/src/init.c
-index 32539cf..e76de65 100644
+index 32539cf..dddb9e1 100644
 --- a/src/init.c
 +++ b/src/init.c
 @@ -26,7 +26,8 @@
@@ -1262,7 +1262,7 @@ index 32539cf..e76de65 100644
  extern void initialisePlatform();
  
  unsigned long clampHeapLimit(long long limit) {
-@@ -34,6 +35,175 @@ unsigned long clampHeapLimit(long long limit) {
+@@ -34,6 +35,208 @@ unsigned long clampHeapLimit(long long limit) {
      return (unsigned long)MIN(clamp, MAX_MAX_HEAP);
  }
  
@@ -1271,6 +1271,7 @@ index 32539cf..e76de65 100644
 +#ifdef __amigaos4__
 +#include <proto/exec.h>
 +#include <unistd.h>
++#include <fcntl.h>
 +#include <pthread.h>
 +static int amiga_vfprintf(FILE *stream, const char *fmt, va_list ap) {
 +    char buf[1024];
@@ -1419,6 +1420,38 @@ index 32539cf..e76de65 100644
 +    if(getThreadsCount() > target_threads)
 +        exitDumpRemainingThreads();
 +
++    /*
++     * How many descriptors are still open, reported because it is the number
++     * that separates two very different complaints.
++     *
++     * AmigaOS does not reclaim DOS locks from an exiting process the way a Unix
++     * kernel does -- whatever is still open stays locked, and the file cannot be
++     * deleted or replaced afterwards, from any program.  Applications have hit
++     * this as ".tmp files that survive Java" and as "Device busy" on the NEXT
++     * run, which look like path bugs and are not.
++     *
++     * Counting is not fixing: closing them here, with application threads still
++     * running (the dump above says how many), would pull descriptors out from
++     * under code still using them.  But a count at the moment of exit says
++     * whether anything was left at all, which is what tells a leak in the
++     * runtime apart from an application that never closed its own files.
++     */
++    {
++        long max = sysconf(_SC_OPEN_MAX);
++        int open_count = 0;
++        int fd;
++
++        if(max < 0 || max > 4096)
++            max = 4096;
++
++        for(fd = 0; fd < (int)max; fd++)
++            if(fcntl(fd, F_GETFD) != -1)
++                open_count++;
++
++        DebugPrintF("[EXIT] descriptors still open: %d "
++                    "(3 = stdin/stdout/stderr, i.e. none leaked)\n", open_count);
++    }
++
 +    /* Close any Intuition windows before returning to main().  The atexit
 +       handler registered by libamigaawt is bypassed if anything later calls
 +       _Exit(), so invoke its cleanup directly if the library registered one. */
@@ -1438,7 +1471,7 @@ index 32539cf..e76de65 100644
  /* Setup default values for command line args */
  
  void setDefaultInitArgs(InitArgs *args) {
-@@ -60,14 +230,45 @@ void setDefaultInitArgs(InitArgs *args) {
+@@ -60,14 +263,45 @@ void setDefaultInitArgs(InitArgs *args) {
      args->java_stack = DEFAULT_STACK;
      args->max_heap   = phys_mem == 0 ? DEFAULT_MAX_HEAP
                                       : clampHeapLimit(phys_mem/4);
@@ -1485,7 +1518,7 @@ index 32539cf..e76de65 100644
  
  #ifdef INLINING
      args->replication_threshold = 10;
-@@ -89,34 +290,46 @@ int VMInitialising() {
+@@ -89,34 +323,46 @@ int VMInitialising() {
      return VM_initing;
  }
  

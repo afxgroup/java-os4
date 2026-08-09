@@ -384,9 +384,21 @@ public final class AmigaToolkit extends SunToolkit {
         return false;
     }
 
+    /*
+     * Supported, unlike the rest of the peer surface.  The pointer belongs to
+     * Intuition rather than to a widget set, so a Swing-only toolkit can still
+     * answer where it is -- and has to: FlatLaf calls MouseInfo.getPointerInfo()
+     * to place every tooltip, so throwing here threw on the event dispatch
+     * thread for something entirely ordinary.
+     */
+    private MouseInfoPeer mouseInfoPeer;
+
     @Override
-    protected MouseInfoPeer getMouseInfoPeer() {
-        throw unsupported("MouseInfo");
+    protected synchronized MouseInfoPeer getMouseInfoPeer() {
+        if (mouseInfoPeer == null) {
+            mouseInfoPeer = new AmigaMouseInfoPeer();
+        }
+        return mouseInfoPeer;
     }
 
     /* deprecated Toolkit abstracts */
