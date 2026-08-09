@@ -55,8 +55,12 @@ public class CryptoBench {
         System.out.println();
         System.out.println(cryptoStats());
         System.out.println();
-        System.out.println("GCM vs CBC is the cost of GHASH; the absolute rate");
-        System.out.println("is the ceiling for anything over https.");
+        System.out.println("GCM is native (GCTR + GHASH), CBC is not: the gap");
+        System.out.println("between them is C against interpreted bytecode, not");
+        System.out.println("one mode against another.  The absolute rate is the");
+        System.out.println("ceiling for anything over https -- read GCTR");
+        System.out.println("declined=0 with bytes matching GHASH as the proof");
+        System.out.println("that the native saw all of the data.");
     }
 
     /*

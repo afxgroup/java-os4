@@ -63,7 +63,26 @@ what fails is Java's `file:` URL layer. Worked around by seeding from clib4's
 seconds off every JVM start, but the URL path is still broken and other things
 will trip over it.
 
-## AES is the TLS ceiling
+## AES: done, and what it cost to find
+
+Native counter mode landed and GCM went from 506 to 6311 KB/s, a factor of
+twelve, with GCTR reporting declined=0 and a byte count matching GHASH's
+exactly.  CBC is untouched at 437 -- it goes through AESCrypt.encryptBlock, so
+the gap between the two modes is now C against bytecode rather than anything
+about the modes.
+
+The lesson worth keeping is not about crypto.  Three builds reported "native"
+from reflection while the Java loop did all the work, because a native method
+binds only to libraries owned by its own class loader (ClassLoader.findNative,
+no fallback to the system list) and GCTR comes from the extension loader.  The
+UnsatisfiedLinkError was caught by a robustness handler and thrown away.
+Asking "is this method native" is not asking "does this native run"; only the
+call counters could tell them apart.
+
+Still interpreted, if CBC suites ever matter: CipherBlockChaining.implEncrypt
+and implDecrypt, same shape, same treatment.
+
+## The old AES entry, kept for the reasoning
 
 `AESCrypt.encryptBlock` is still interpreted, and with GHASH now native it is
 what the remaining throughput is made of: all four bulk ciphers land in one
