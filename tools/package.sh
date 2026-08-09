@@ -222,12 +222,24 @@ mkdir -p "$RT/classes"
 # --- examples + test suite (runnable out of the box) ----------------------
 # 0.5.0 shipped nothing to run but `java -version`; bundle a headless demo, a
 # Swing demo, and the self-verifying VM test suite.
+#
+# Everything build-tests.sh produced, rather than a second hand-kept list.
+# There used to be one here naming each jar, which meant a new example was built
+# and then silently not shipped -- ClassPathCheck was added and went missing
+# exactly that way.  One list, in build-tests.sh, and this ships its output.
 mkdir -p "$RT/examples"
-cp "$B/examples/"HelloJava.jar "$B/examples/"SwingDemo.jar \
-   "$B/examples/"NetTest.jar "$B/examples/"NetDownload.jar \
-   "$B/examples/"ExecTest.jar "$B/examples/"ExecLeak.jar \
-   "$B/examples/"CryptoBench.jar "$RT/examples/"
-[ -f "$B/examples/"awttest.jar ] && cp "$B/examples/"awttest.jar "$RT/examples/"
+exok=0
+for jar in "$B/examples/"*.jar; do
+    [ -f "$jar" ] || continue
+    cp "$jar" "$RT/examples/"
+    exok=$((exok+1))
+done
+if [ "$exok" -eq 0 ]; then
+    echo "ERROR: no example jars in $B/examples -- run tools/build-tests.sh first" >&2
+    exit 1
+fi
+echo "=== examples: $exok jars ==="
+ls "$RT/examples/" | sed 's/^/    /'
 cp "$B/testsuite.zip" "$RT/examples/"
 
 # --- runtime: lib/ resources (read from java.home/lib) --------------------
