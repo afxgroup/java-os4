@@ -38,17 +38,35 @@
  * be set by whoever starts the VM.  Hence: set it here, then spawn.
  *
  *
- * WHY spawnv() AND NOT system()
+ * WHY system() AND NOT spawnv()
  *
- * system() takes a STRING.  Handing it one means concatenating argv back into a
- * command line and quoting each element for the DOS shell by hand -- rebuilding
- * exactly the layer whose mis-parsing this program exists to fix, only with our
- * own bugs in it.  The first argument containing a space would break it.
+ * This used to use spawnv(P_WAIT), on the reasoning that it takes argv as an
+ * ARRAY and lets clib4 do the quoting, where system() takes a string and makes
+ * the quoting ours to get wrong.  That reasoning was about the wrong risk.
  *
- * spawnv() takes argv as an ARRAY.  clib4 does the quoting itself, once, in
- * build_arg_string(), which already handles spaces, tabs, newlines and embedded
- * quotes with AmigaDOS '*' escapes.  Nothing here builds a command line, so
- * nothing here can mis-split one.
+ * clib4's spawnv and spawnvpe both create the child with
+ *
+ *     NP_Child,                TRUE
+ *     NP_NotifyOnDeathSigTask, me
+ *
+ * so the new process is a DOS child of this one and signals THIS TASK when it
+ * dies.  That is fine while we are alive and is not fine afterwards.  An
+ * auto-updater is the case that breaks it: the application spawns `java`, which
+ * spawns the VM, and then the application exits -- so the VM is left signalling
+ * a task that no longer exists, and DOS is left holding process structures for
+ * a parent that has gone ("Parent #185 deletion resuming, all children have now
+ * gone" appears in the crash dump).  The grandchild crashed after the shell had
+ * returned to the prompt.
+ *
+ * system() creates a process with neither tag -- clib4 passes only
+ * SYS_UserShell -- so it is independent of us, and still synchronous, which is
+ * what a launcher wants: the shell does not return while Java runs, and the
+ * exit code is real.
+ *
+ * The quoting that argument was originally about is real, and is done here
+ * (quote_arg), to AmigaDOS's rules rather than a shell's, and tested on the
+ * host.  It is a bounded problem with a known answer; a child tethered to a
+ * dead parent is not.
  *
  * GPLv2 (java-os4 project).
  */
@@ -93,8 +111,8 @@ const char __attribute__((used)) java_launcher_verstag[] =
  * running -- that is why the old script got away with it.)
  *
  * So PROGDIR: is resolved HERE, where this program is running and it does mean
- * something, and spawnv is handed an absolute path.  JAVA: is the fallback, and
- * is what the installer uses.
+ * something, and the command line carries an absolute path.  JAVA: is the
+ * fallback, and is what the installer uses.
  */
 #define FALLBACK_HOME "JAVA:"
 #define VM_BINARY     "jamvm-openjdk"
@@ -250,41 +268,134 @@ static void set_library_path(void) {
     }
 }
 
-int main(int argc, char *argv[]) {
-    const char **child;
-    int status;
+/*
+ * Does this argument have to be quoted for the AmigaDOS shell?
+ *
+ * The same set clib4's own build_arg_string() uses: whitespace splits an
+ * argument, and a quote would otherwise start or end one.  0xA0 is a
+ * non-breaking space, which the shell also treats as whitespace and which
+ * arrives from any application that took its arguments from a GUI.
+ */
+static int needs_quoting(const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+
+    if(*p == '\0') {
+        return 1;               /* an empty argument must survive as one */
+    }
+    for(; *p != '\0'; p++) {
+        if(*p == ' ' || *p == '\t' || *p == '\n' || *p == 0xA0 || *p == '"') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Append one argument, quoted if it needs to be.  Returns the number of
+ * characters it would have written, so the caller can size the buffer by
+ * running it once with a NULL destination -- the same measure-then-write shape
+ * snprintf has, and for the same reason: guessing a bound for something that
+ * can double in length is how buffers get overrun.
+ *
+ * AmigaDOS escapes with '*', not '\': a literal quote is *" and a literal
+ * asterisk is **.  A newline inside an argument becomes *N, since a raw one
+ * would end the command.
+ */
+static size_t quote_arg(char *dst, const char *s) {
+    size_t n = 0;
+
+#define PUT(c) do { if(dst != NULL) dst[n] = (c); n++; } while(0)
+
+    if(!needs_quoting(s)) {
+        for(; *s != '\0'; s++) {
+            PUT(*s);
+        }
+        return n;
+    }
+
+    PUT('"');
+    for(; *s != '\0'; s++) {
+        switch(*s) {
+            case '"':
+            case '*':
+                PUT('*');
+                PUT(*s);
+                break;
+            case '\n':
+                PUT('*');
+                PUT('N');
+                break;
+            default:
+                PUT(*s);
+                break;
+        }
+    }
+    PUT('"');
+    return n;
+
+#undef PUT
+}
+
+/*
+ * The whole command line: the VM, then our arguments, quoted and space
+ * separated.  Measured first, then written, so the buffer is exactly right.
+ * NULL if it cannot be allocated.
+ */
+static char *build_command(const char *program, int argc, char *argv[]) {
+    size_t len = quote_arg(NULL, program);
+    char *cmd;
+    size_t n;
     int i;
 
+    for(i = 1; i < argc; i++) {
+        len += 1 + quote_arg(NULL, argv[i]);       /* separating space */
+    }
+
+    cmd = malloc(len + 1);
+    if(cmd == NULL) {
+        return NULL;
+    }
+
+    n = quote_arg(cmd, program);
+    for(i = 1; i < argc; i++) {
+        cmd[n++] = ' ';
+        n += quote_arg(cmd + n, argv[i]);
+    }
+    cmd[n] = '\0';
+
+    return cmd;
+}
+
+int main(int argc, char *argv[]) {
+    char *command;
+    int status;
+
     /*
-     * child[0] is the program name and is NOT passed on: clib4's
-     * build_arg_string() skips element 0 by convention (it builds the argument
-     * string only, and spawnv prepends `file` itself).  Passing our own argv[0]
-     * through would put the launcher's name in front of the VM's arguments,
-     * where it would be read as the main class.
+     * The command line is built here rather than handed over as an array,
+     * because system() takes a string -- see the note at the top for why that
+     * trade is the right way round.  quote_arg() is what makes it safe.
      */
     resolve_paths();
+    set_library_path();
 
-    child = malloc((argc + 1) * sizeof(*child));
-    if(child == NULL) {
+    command = build_command(vm_program, argc, argv);
+    if(command == NULL) {
         fprintf(stderr, "java: out of memory building the command line\n");
         return 1;
     }
 
-    child[0] = vm_program;
-    for(i = 1; i < argc; i++) {
-        child[i] = argv[i];
-    }
-    child[argc] = NULL;
-
-    set_library_path();
-
     /*
-     * P_WAIT, so this process stays alive for as long as the VM does.  That
-     * costs one small process, and buys two things worth more: the shell does
-     * not return to the prompt while Java is still running, and the exit code
-     * below is the VM's own -- scripts testing $RC get the real answer.
+     * Synchronous, and NOT a DOS child of this process: clib4's system() passes
+     * only SYS_UserShell, so the VM does not signal this task when it dies and
+     * DOS does not hold our process structure open waiting for it.  That is the
+     * whole point of using system() here -- an auto-updater outlives the
+     * application that started it, and a tethered process crashes when its
+     * parent has gone.
+     *
+     * Still synchronous, so the shell does not return while Java runs and the
+     * exit code below is the VM's own.
      */
-    status = spawnv(P_WAIT, vm_program, child);
+    status = system(command);
 
     if(status == -1) {
         /* The common cause by far is a broken installation -- `java` copied
@@ -294,10 +405,10 @@ int main(int argc, char *argv[]) {
            looked right in the source and did not survive being resolved. */
         fprintf(stderr, "java: cannot start %s: %s\n", vm_program, strerror(errno));
         fprintf(stderr, "java: the runtime must sit in the same drawer as this program\n");
-        free(child);
+        free(command);
         return 127;   /* what a shell reports for "command not found" */
     }
 
-    free(child);
+    free(command);
     return status;
 }

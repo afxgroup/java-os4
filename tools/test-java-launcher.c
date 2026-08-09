@@ -1,20 +1,17 @@
 /*
  * Host unit test for src/launcher/java.c.
  *
- * The launcher cannot be run here -- it is a PowerPC binary -- but the one thing
- * that can be silently and expensively wrong is testable anywhere: WHICH
- * arguments reach the VM.
+ * The launcher cannot be run here -- it is a PowerPC binary -- but the thing
+ * that can be silently and expensively wrong is testable anywhere: the COMMAND
+ * LINE it hands to system().
  *
- * clib4's build_arg_string() skips argv[0] by convention, because spawnv puts
- * the program name in front itself.  Get that off by one and the launcher's own
- * name is passed to the VM as its first argument -- where the VM reads the first
- * non-option token as the main class, so `java -version` would try to load a
- * class called `java` and every error message would be about the wrong thing.
- * It would also look FINE in the common case, because a stray leading token is
- * invisible whenever a real main class follows it.
- *
- * So: compile java.c for the host with spawnv() replaced by a recorder, and
- * assert on exactly what it was handed.
+ * That line is built by us now rather than by clib4, because system() creates a
+ * process that is not a DOS child of ours and does not signal our task when it
+ * dies -- which spawnv's child does, and which crashed an auto-updater that
+ * outlived the application that started it.  Taking on the string means taking
+ * on the quoting, so the quoting is what this tests: AmigaDOS rules, where the
+ * escape is '*' and not '\', and where getting it wrong turns one argument
+ * into two or swallows the next.
  *
  *     cc -o test-java-launcher tools/test-java-launcher.c && ./test-java-launcher
  *
@@ -24,35 +21,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Stand in for clib4's unistd.h before java.c includes it. */
-#define P_WAIT 1
+static char recorded[4096];
+static int  recorded_calls;
 
-#define MAX_RECORDED 32
-
-static char recorded_file[512];
-static char recorded[MAX_RECORDED][512];
-static const char *recorded_argv[MAX_RECORDED];
-static int recorded_argc;
-static int spawn_result = 0;
-
-/*
- * The recorder COPIES.  java.c frees its argument array before returning -- as
- * it should -- so holding the pointer and reading it afterwards is a use after
- * free, which is how the first version of this test crashed rather than failed.
- */
-static int spawnv(int mode, const char *file, const char **argv) {
-    int i;
-    (void)mode;
-
-    snprintf(recorded_file, sizeof(recorded_file), "%s", file);
-    for(i = 0; argv[i] != NULL && i < MAX_RECORDED - 1; i++) {
-        snprintf(recorded[i], sizeof(recorded[i]), "%s", argv[i]);
-        recorded_argv[i] = recorded[i];
-    }
-    recorded_argv[i] = NULL;
-    recorded_argc = i;
-    return spawn_result;
+/* Stands in for clib4's system(): records the command instead of running it. */
+static int system_stub(const char *command) {
+    snprintf(recorded, sizeof(recorded), "%s", command);
+    recorded_calls++;
+    return 0;
 }
+#define system system_stub
 
 /* java.c's main becomes launcher_main so this file can keep its own. */
 #define main launcher_main
@@ -70,9 +48,7 @@ static void check(int cond, const char *what) {
 
 static void run(char *const *argv, int argc) {
     unsetenv("LD_LIBRARY_PATH");
-    recorded_argc = 0;
-    recorded_argv[0] = NULL;
-    recorded_file[0] = '\0';
+    recorded[0] = '\0';
     launcher_main(argc, (char **)argv);
 }
 
@@ -82,8 +58,9 @@ int main(void) {
      * subtle bug -- it produces "PROGDIR:jamvm-openjdk: Comando sconosciuto"
      * and a runtime that cannot start at all, which is what shipped once.
      *
-     * PROGDIR: must never reach spawnv: the command name is resolved before the
-     * new program is loaded, so there is no home directory for it to mean.
+     * PROGDIR: must never reach the command line: the command name is resolved
+     * before the new program is loaded, so there is no home directory for it to
+     * mean.
      */
     printf("java launcher -- path resolution\n\n");
     {
@@ -126,67 +103,98 @@ int main(void) {
         check(strcmp(vm_sobjs, "JAVA:Sobjs") == 0,
               "fallback: JAVA:Sobjs likewise");
         check(strstr(vm_program, "PROGDIR:") == NULL,
-              "PROGDIR: never reaches spawnv (it cannot be resolved there)");
+              "PROGDIR: never reaches the command line");
     }
 
-    printf("\njava launcher -- argument passing\n\n");
+    printf("\njava launcher -- the command line\n\n");
 
     /*
-     * The bug this program exists to prevent.  '=' must arrive as ONE token:
-     * the AmigaDOS script turned `-Dfoo=bar` into `-Dfoo` and `bar`, and the VM
-     * then treated `bar` as the class to run.
+     * The bug this program exists to prevent.  '=' must survive as part of one
+     * argument: the AmigaDOS script turned `-Dfoo=bar` into `-Dfoo` and `bar`,
+     * and the VM read the value as the class to run.
      */
     {
         char *argv[] = { "java", "-Djava.security.debug=provider",
                          "-cp", "x.jar", "Main", NULL };
         run(argv, 5);
 
-        check(recorded_argc == 5, "-Dk=v: five elements reach spawnv");
-        check(strcmp(recorded_argv[0], vm_program) == 0,
-              "-Dk=v: element 0 is the VM, not our own argv[0]");
-        check(strcmp(recorded_argv[1], "-Djava.security.debug=provider") == 0,
+        check(strstr(recorded, "-Djava.security.debug=provider") != NULL,
               "-Dk=v: the property arrives whole, '=' intact");
-        check(strcmp(recorded_argv[4], "Main") == 0,
-              "-Dk=v: the main class is still the last token");
-        check(recorded_argv[5] == NULL,
-              "-Dk=v: the array is NULL-terminated");
+        check(strstr(recorded, "\"-Djava") == NULL,
+              "-Dk=v: and is NOT quoted -- it needs none");
+        check(strncmp(recorded, vm_program, strlen(vm_program)) == 0,
+              "the VM is the first word of the command");
+        check(strstr(recorded, "Main") != NULL,
+              "the main class is still there");
     }
 
-    /*
-     * The launcher's own name must NOT be forwarded.  If it were, element 1
-     * would be "java" and the VM would run the wrong class.
-     */
+    /* The launcher's own argv[0] must not be forwarded: it would become the
+       VM's first argument, where it reads as the main class. */
     {
         char *argv[] = { "java", "-version", NULL };
-        run(argv, 2);
+        char expect[600];
 
-        check(recorded_argc == 2, "-version: exactly one argument forwarded");
-        check(strcmp(recorded_argv[1], "-version") == 0,
-              "-version: argv[0] of the launcher is dropped, not passed on");
+        run(argv, 2);
+        snprintf(expect, sizeof(expect), "%s -version", vm_program);
+        check(strcmp(recorded, expect) == 0,
+              "-version: exactly '<vm> -version', our own name dropped");
     }
 
-    /* No arguments at all: the VM must still be started, so it can print its
-       own usage rather than the launcher inventing one. */
     {
         char *argv[] = { "java", NULL };
         run(argv, 1);
-
-        check(recorded_argc == 1, "no args: the VM is still spawned");
-        check(strcmp(recorded_file, vm_program) == 0,
-              "no args: spawnv is told which program to run");
+        check(strcmp(recorded, vm_program) == 0,
+              "no args: the VM alone, and it IS still started");
     }
 
-    /*
-     * An argument with a space is passed as one array element and is NOT
-     * quoted here -- clib4's build_arg_string does that, and doing it twice
-     * would embed literal quotes in the path.
-     */
+    printf("\nquoting (AmigaDOS rules)\n\n");
+
+    /* A space is the whole reason quoting exists: unquoted, this classpath
+       would become two arguments and the main class would be eaten. */
     {
         char *argv[] = { "java", "-cp", "Work:My Dir/app.jar", "Main", NULL };
         run(argv, 4);
+        check(strstr(recorded, "\"Work:My Dir/app.jar\"") != NULL,
+              "an argument containing a space is quoted");
+        check(strstr(recorded, "Main") != NULL,
+              "and the argument after it survives");
+    }
 
-        check(strcmp(recorded_argv[2], "Work:My Dir/app.jar") == 0,
-              "spaces: passed through untouched, quoting left to clib4");
+    /* AmigaDOS escapes with '*', so a literal quote is *" -- a backslash here
+       would be passed through as an ordinary character and the quote would
+       close the argument early. */
+    {
+        char *argv[] = { "java", "-Dmsg=say \"hi\"", NULL };
+        run(argv, 2);
+        check(strstr(recorded, "*\"hi*\"") != NULL,
+              "an embedded quote is escaped with '*', not backslash");
+    }
+
+    /* A literal asterisk must be doubled, or it would be read as an escape and
+       eat the character after it. */
+    {
+        char *argv[] = { "java", "-cp", "lib/* extra", NULL };
+        run(argv, 3);
+        check(strstr(recorded, "lib/**") != NULL,
+              "a literal '*' is doubled inside a quoted argument");
+    }
+
+    /* An empty argument has to survive as an argument. */
+    {
+        char *argv[] = { "java", "-cp", "", "Main", NULL };
+        run(argv, 4);
+        check(strstr(recorded, "\"\"") != NULL,
+              "an empty argument is quoted so it is not lost");
+    }
+
+    /* Nothing that needs no quoting should get any: a quoted classpath is still
+       correct, but noise in every command line makes real problems harder to
+       see. */
+    {
+        char *argv[] = { "java", "-cp", "app.jar", "Main", NULL };
+        run(argv, 4);
+        check(strchr(recorded, '"') == NULL,
+              "ordinary arguments are left alone");
     }
 
     printf("\nLD_LIBRARY_PATH\n\n");
