@@ -62,7 +62,7 @@ cp "$B/libjvm.so"     "$RT/"
 } > "$RT/java"
 
 # --- runtime: OpenJDK + AWT natives ---------------------------------------
-for so in libjava libverify libzip libnio libnet libsunec \
+for so in libjava libverify libzip libnio libnet libsunec libamigacrypto \
           libawt libfontmanager libamigaawt liblcms; do
     cp "$N/$so.so" "$RT/"
 done

@@ -149,7 +149,43 @@ final class GCTR {
                                            byte[] out, int outOfs);
 
     /** Cleared for good the first time the native turns out not to be there. */
-    private static volatile boolean nativeUsable = true;
+    private static volatile boolean nativeUsable;
+
+    /*
+     * The library has to be loaded HERE, by this class, because a native method
+     * binds only to libraries owned by its own class loader:
+     *
+     *     static long findNative(ClassLoader loader, String name) {
+     *         Vector<NativeLibrary> libs =
+     *             loader != null ? loader.nativeLibraries : systemNativeLibraries;
+     *
+     * with no fallback to the system list.  This class comes from
+     * lib/ext/sunjce_provider.jar through the extension loader, so the natives
+     * in libjava.so -- loaded by the bootstrap loader for GHASH and the rest --
+     * are unreachable from here however correct they are.  loadLibrary from
+     * this class registers libamigacrypto.so under the extension loader, which
+     * is the only place this method can be found.
+     */
+    static {
+        boolean ok = false;
+
+        try {
+            System.loadLibrary("amigacrypto");
+            ok = true;
+        } catch (Throwable t) {
+            /* Loud, once.  The previous arrangement caught the failure and
+               fell back silently, and three builds went by showing "native" in
+               every diagnostic while the Java loop did all the work.  A quiet
+               fallback is a comfort right up until it is the only thing
+               standing between you and the answer. */
+            System.err.println("amigacrypto: counter mode stays interpreted ("
+                               + t + ")");
+        }
+        nativeUsable = ok;
+    }
+
+    /** {calls, declined, bytes} -- see CryptoBench. */
+    static native long[] nativeStats();
 
     // input can be arbitrary size when calling doFinal
     protected int doFinal(byte[] in, int inOfs, int inLen, byte[] out,

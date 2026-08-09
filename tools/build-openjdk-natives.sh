@@ -1101,6 +1101,28 @@ echo "  undefined check:"; ppc-amigaos-nm -D -u "$OUT/libnet.so" 2>/dev/null \
 ppc-amigaos-nm -D --defined-only "$OUT/libjava.so" 2>/dev/null | grep -qw getErrorString \
     || echo "    UNRESOLVED getErrorString (not exported by libjava.so either)"
 
+echo "=== libamigacrypto.so (AES counter mode, for the extension loader) ==="
+# Its own library, not part of libjava.so, and the reason is class loaders
+# rather than modularity.  ClassLoader.findNative looks only at the libraries
+# owned by the calling class's own loader, with no fallback to the system list.
+# GCTR comes from lib/ext/sunjce_provider.jar through the extension loader,
+# whose library list is empty -- so a native in libjava.so, loaded by the
+# bootstrap loader, is unreachable from it no matter how correct the code is.
+# GCTR loads this one itself, which registers it under the right loader.
+rm -rf "$OUT/libamigacrypto"; mkdir -p "$OUT/libamigacrypto"
+if $CC $LJINC -c "$PROJECT_ROOT/src/openjdk/amiga_aes.c" \
+       -o "$OUT/libamigacrypto/amiga_aes.o" 2>"$OUT/e"; then
+    if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
+           -o "$OUT/libamigacrypto.so" "$OUT"/libamigacrypto/*.o 2>"$OUT/e"; then
+        echo "  libamigacrypto.so OK ($(wc -c < "$OUT/libamigacrypto.so") bytes)"
+    else
+        echo "  libamigacrypto.so LINK FAIL"; head -10 "$OUT/e"
+    fi
+else
+    echo "  amiga_aes.c FAIL"
+    grep -m3 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
+fi
+
 echo "=== libsunec.so (SunEC: elliptic curve crypto) ==="
 # Without this the SunEC provider cannot register (its class initialiser does
 # System.loadLibrary("sunec")), so java.security's security.provider.3 is

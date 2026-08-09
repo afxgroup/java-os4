@@ -116,15 +116,22 @@ public class CryptoBench {
      */
     private static String cryptoStats() {
         try {
-            long[] s = (long[]) Class.forName("java.lang.AmigaDiag")
+            /* Read from two places because they live in two libraries: GHASH's
+               native is in libjava.so (boot loader), GCTR's in
+               libamigacrypto.so (extension loader), and a .so has its own
+               statics.  That split is not tidiness -- see GCTR's loadLibrary. */
+            long[] g = (long[]) Class.forName("java.lang.AmigaDiag")
                                      .getMethod("cryptoStats").invoke(null);
-            if (s == null || s.length < 5) {
-                return "crypto natives: no counters";
-            }
-            return "GCTR  calls=" + s[0] + " declined=" + s[1]
-                 + " bytes=" + s[2] + "\n"
-                 + "GHASH calls=" + s[3] + " blocks=" + s[4]
-                 + " (" + (s[4] * 16) + " bytes)";
+            java.lang.reflect.Method m =
+                Class.forName("com.sun.crypto.provider.GCTR")
+                     .getDeclaredMethod("nativeStats");
+            m.setAccessible(true);
+            long[] c = (long[]) m.invoke(null);
+
+            return "GCTR  calls=" + c[0] + " declined=" + c[1]
+                 + " bytes=" + c[2] + "\n"
+                 + "GHASH calls=" + g[0] + " blocks=" + g[1]
+                 + " (" + (g[1] * 16) + " bytes)";
         } catch (Throwable t) {
             return "crypto natives: not this runtime";
         }
