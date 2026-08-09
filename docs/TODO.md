@@ -25,6 +25,39 @@ Two things worth not rediscovering:
 `tools/test-java-launcher.c` compiles the launcher for the host with `spawnv`
 replaced by a recorder and asserts on what it was handed; the build runs it.
 
+## A self-updating application cannot rewrite its own jar
+
+Reported as a path bug, and it is not one:
+
+```
+scaricato, decomprimo invrec.zip in /Work:Invoicex/.
+Decomprimo /Work:Invoicex/./Invoicex.jar
+java.io.FileNotFoundException: ./Invoicex.jar (Device busy)
+```
+
+The `./` is a red herring -- `amiga_path()` resolves it correctly
+(`"./Invoicex.jar"` -> `"Invoicex.jar"`, `"a/./b"` -> `"a/b"`, covered by the
+host tests). **"Device busy" is `EBUSY`, which clib4 maps from
+`ERROR_OBJECT_IN_USE`**: the file was found, and the open failed because
+something holds it. That something is the class path -- `Invoicex.jar` is the
+first entry, so the class loader has it open.
+
+AmigaOS `Open(MODE_NEWFILE)` needs an exclusive lock and the loader's read holds
+a shared one, so this is correct behaviour rather than a gap. Windows refuses
+the same operation for the same reason; POSIX allowing it is the exception, not
+the rule. It cannot be worked around inside the VM: the loader must keep the jar
+open, and AmigaOS has no delete-or-rename-while-open either.
+
+The application has to write beside the target and swap on next start. Worth
+recording because the error message points at the path and the path is fine.
+
+**Note the second-order effect**, which is the part actually worth chasing: the
+rewrite was an attempted *repair*, triggered because the run had already failed
+with `NoClassDefFoundError: it/tnx/Db` while `lib/commons-tnx.jar` was present
+in `java.class.path`. The jar overwrite is the symptom. `examples/ClassPathCheck`
+exists to tell those apart -- entry absent, unreadable, not a zip, class not
+present, or present and failing its own initialisation.
+
 ## `file:/RANDOM:` cannot be opened through Java
 
 `securerandom.source=file:/RANDOM:` fails with

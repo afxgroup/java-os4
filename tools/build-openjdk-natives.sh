@@ -1101,6 +1101,81 @@ echo "  undefined check:"; ppc-amigaos-nm -D -u "$OUT/libnet.so" 2>/dev/null \
 ppc-amigaos-nm -D --defined-only "$OUT/libjava.so" 2>/dev/null | grep -qw getErrorString \
     || echo "    UNRESOLVED getErrorString (not exported by libjava.so either)"
 
+echo "=== libmanagement.so (java.lang.management) ==="
+# Was simply missing, so ManagementFactory.getRuntimeMXBean() -- a routine call,
+# and one InvoiceX makes during startup -- died in ManagementFactoryHelper's
+# class initialiser with "no management in java.library.path".
+#
+# JamVM does implement the VM side (classlib/openjdk/management.c exports a
+# jmmInterface_1_ and JVM_GetManagement returns it for JMM_VERSION_1_0), so the
+# shared natives work as they are.  What is missing on AmigaOS is the PLATFORM
+# half: OperatingSystemImpl.c reads /proc, <sys/swap.h> and statvfs64, and
+# FileSystemImpl.c wants statvfs64 as well.  src/openjdk/amiga_management.c
+# stands in for both -- the same treatment amiga_net.c gives NetworkInterface.c.
+MGMT_SH="ClassLoadingImpl DiagnosticCommandImpl Flag GarbageCollectorImpl \
+GcInfoBuilder HotSpotDiagnostic HotspotThread MemoryImpl MemoryManagerImpl \
+MemoryPoolImpl ThreadImpl VMManagementImpl management"
+
+for c in ClassLoadingImpl DiagnosticCommandImpl Flag GarbageCollectorImpl \
+         GcInfoBuilder HotSpotDiagnostic HotspotThread MemoryImpl \
+         MemoryManagerImpl MemoryPoolImpl ThreadImpl VMManagementImpl \
+         FileSystemImpl OperatingSystemImpl; do
+    "$BOOT_JDK/bin/javah" -d "$HDR" -classpath "$RTJAR" "sun.management.$c" >/dev/null 2>&1 || true
+done
+
+MGMTINC="-I $HDR $EXP -I $J/src/share/native/common -I $J/src/solaris/native/common \
+ -I $J/src/share/native/sun/management"
+rm -rf "$OUT/libmanagement"; mkdir -p "$OUT/libmanagement"
+mgmtok=0; mgmtfail=0
+for f in $MGMT_SH; do
+    if $CC $MGMTINC -c "$J/src/share/native/sun/management/$f.c" \
+           -o "$OUT/libmanagement/$f.o" 2>"$OUT/e"; then
+        mgmtok=$((mgmtok+1))
+    else
+        mgmtfail=$((mgmtfail+1)); echo "  MGMT FAIL $f.c"
+        grep -m2 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
+    fi
+done
+if $CC $MGMTINC -c "$PROJECT_ROOT/src/openjdk/amiga_management.c" \
+       -o "$OUT/libmanagement/amiga_management.o" 2>"$OUT/e"; then
+    mgmtok=$((mgmtok+1)); echo "  amiga_management.c OK"
+else
+    mgmtfail=$((mgmtfail+1)); echo "  amiga_management.c FAIL"
+    grep -m4 -E "error:" "$OUT/e" | sed 's/^/        /'
+fi
+echo "  libmanagement compile: $mgmtok OK, $mgmtfail FAILED"
+
+if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
+       -o "$OUT/libmanagement.so" "$OUT"/libmanagement/*.o 2>"$OUT/e"; then
+    echo "  libmanagement.so OK ($(wc -c < "$OUT/libmanagement.so") bytes)"
+else
+    echo "  libmanagement.so LINK FAIL"; head -10 "$OUT/e"
+fi
+
+# Every native rt.jar DECLARES must be DEFINED here.
+#
+# This check is not decoration.  The rt.jar we ship is the boot JDK's (8u502),
+# which is newer than the OpenJDK drop in vendor/: 8u502 renamed most of
+# OperatingSystemImpl's natives to a trailing 0 and added
+# ThreadImpl.getTotalThreadAllocatedMemory.  A native whose name does not match
+# its declaration compiles cleanly and simply never binds, so building against
+# the source drop and assuming the two agree would produce a library that loads
+# and then throws UnsatisfiedLinkError on first use -- the exact failure this
+# whole block exists to remove.
+if [ -s "$OUT/libmanagement.so" ]; then
+    LC_ALL=C grep -h "^JNIEXPORT" -A1 "$HDR"/sun_management_*.h 2>/dev/null \
+        | grep -oE "Java_sun_management_[A-Za-z0-9_]+" | sort -u > "$OUT/e.declared"
+    LC_ALL=C ppc-amigaos-nm -D --defined-only "$OUT/libmanagement.so" 2>/dev/null \
+        | grep -oE "Java_sun_management_[A-Za-z0-9_]+" | sort -u > "$OUT/e.defined"
+    missing=$(LC_ALL=C comm -23 "$OUT/e.declared" "$OUT/e.defined")
+    if [ -n "$missing" ]; then
+        echo "  MGMT natives declared by rt.jar but NOT implemented:"
+        echo "$missing" | sed 's/^/    MISSING /'
+    else
+        echo "  all $(wc -l < "$OUT/e.declared") natives rt.jar declares are implemented"
+    fi
+fi
+
 echo "=== libamigacrypto.so (AES counter mode, for the extension loader) ==="
 # Its own library, not part of libjava.so, and the reason is class loaders
 # rather than modularity.  ClassLoader.findNative looks only at the libraries

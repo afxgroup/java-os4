@@ -69,6 +69,25 @@ processes started at all.
   averaging 1 MB/s by alternating 250 KB/s and 2 MB/s is not a slow transfer but
   a stalling one, and the two have different causes. That distinction is what
   identified the collector below.
+- **`java.lang.management`** — `libmanagement.so` is built and shipped, so
+  `ManagementFactory.getRuntimeMXBean()` works instead of dying in
+  `ManagementFactoryHelper`'s class initialiser with *"no management in
+  java.library.path"*. JamVM already implemented the VM side (a `jmmInterface_1_`
+  behind `JVM_GetManagement`); what was missing was the platform half, since
+  OpenJDK's `OperatingSystemImpl.c` reads `/proc`, `<sys/swap.h>` and
+  `statvfs64`. [`src/openjdk/amiga_management.c`](src/openjdk/amiga_management.c)
+  supplies those 17 natives — real figures for physical memory and descriptor
+  counts, `0` for swap (AmigaOS has none, so that is a measurement), and `-1`
+  for what genuinely cannot be measured rather than a plausible substitute.
+  The build now checks every native `rt.jar` **declares** against what the
+  library **defines**: the shipped `rt.jar` is 8u502 while the source drop is
+  older, and 8u502 both renamed most of these and added one, so a native that
+  compiles cleanly can simply never bind.
+- Example `ClassPathCheck` — walks `java.class.path` and says which of the five
+  reasons a class did not load: entry absent, unreadable, not a zip, genuinely
+  not present, or present and failing its own initialisation. A
+  `NoClassDefFoundError` names the class and never the reason, and those five
+  are fixed in five different places.
 - [`docs/TODO.md`](docs/TODO.md) — the known gaps, each written up from the
   diagnosis rather than the symptom, so the next person does not start over.
 - Host unit tests for the path conversion and the classpath rewriter, compiled
@@ -187,8 +206,14 @@ processes started at all.
   floating-point results, intermittently, and is therefore not the default —
   see [`docs/ppc32-performance.md`](docs/ppc32-performance.md) for the evidence
   and a candidate fix.
-- `libmanagement.so` is not built, so `ManagementFactory.getRuntimeMXBean()`
-  throws `UnsatisfiedLinkError`.
+- **An application cannot overwrite a jar that is on its own class path.**
+  AmigaOS gives DOS an exclusive lock for writing, and a jar the class loader
+  has open holds a shared one, so a self-updater that rewrites its own jar in
+  place gets `FileNotFoundException: ... (Device busy)` — `EBUSY`, from
+  `ERROR_OBJECT_IN_USE`. This is correct AmigaOS behaviour, not a port defect
+  (Windows refuses for the same reason; only POSIX allows it), and it cannot be
+  worked around from inside the VM. Such applications need to write beside the
+  target and swap on the next start.
 - `file:/RANDOM:` cannot be opened through Java's `file:` URL layer, although
   `RANDOM:` is a perfectly real AmigaOS device that `open()` reads without
   complaint. Worked around by seeding from `getentropy()`.
