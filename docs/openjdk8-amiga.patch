@@ -249,7 +249,7 @@ index 225e23f8dd..044b83ccce 100644
              case java_io_FileSystem_SPACE_TOTAL:
                  rv = jlong_mul(long_to_jlong(fsstat.f_frsize),
 diff --git a/jdk/src/solaris/native/java/io/io_util_md.c b/jdk/src/solaris/native/java/io/io_util_md.c
-index 0dee96b890..ee055df920 100644
+index 0dee96b890..e9562dedc2 100644
 --- a/jdk/src/solaris/native/java/io/io_util_md.c
 +++ b/jdk/src/solaris/native/java/io/io_util_md.c
 @@ -35,11 +35,11 @@
@@ -284,6 +284,20 @@ index 0dee96b890..ee055df920 100644
          /* Remove trailing slashes, since the kernel won't */
          char *p = (char *)ps + strlen(ps) - 1;
          while ((p > ps) && (*p == '/'))
+@@ -188,6 +188,13 @@ handleAvailable(FD fd, jlong *pbytes)
+                 *pbytes = n;
+                 return 1;
+             }
++#ifdef __amigaos4__ /* AMIGA_NO_FIONREAD */
++            /* clib4 has no FIONREAD, and the lseek fallback below is
++               meaningless on a PIPE: handle -- it answered with a count
++               that never decreased.  Say 0 rather than something untrue. */
++            *pbytes = 0;
++            return 1;
++#endif
+         } else if (S_ISREG(mode)) {
+             size = buf64.st_size;
+         }
 diff --git a/jdk/src/solaris/native/java/io/io_util_md.h b/jdk/src/solaris/native/java/io/io_util_md.h
 index b7b2573a02..c28d923e01 100644
 --- a/jdk/src/solaris/native/java/io/io_util_md.h
@@ -327,6 +341,40 @@ index b03bd6ac8f..5432194c22 100644
  
  #ifdef __linux__
          /*
+diff --git a/jdk/src/solaris/native/java/net/PlainSocketImpl.c b/jdk/src/solaris/native/java/net/PlainSocketImpl.c
+index 373c5e3625..39ff6742ac 100644
+--- a/jdk/src/solaris/native/java/net/PlainSocketImpl.c
++++ b/jdk/src/solaris/native/java/net/PlainSocketImpl.c
+@@ -242,6 +242,29 @@ Java_java_net_PlainSocketImpl_socketCreate(JNIEnv *env, jobject this,
+         }
+     }
+ 
++#ifdef __amigaos4__ /* AMIGA_SOCK_DEFAULTS */
++    if (stream) {
++        int on = 1;
++        int want = 64 * 1024;
++        int cur = 0;
++        socklen_t len = sizeof(cur);
++
++        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char *)&on, sizeof(on));
++
++        if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&cur, &len) == 0
++                && cur < want) {
++            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&want, sizeof(want));
++        }
++
++        cur = 0;
++        len = sizeof(cur);
++        if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char *)&cur, &len) == 0
++                && cur < want) {
++            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char *)&want, sizeof(want));
++        }
++    }
++#endif
++
+     (*env)->SetIntField(env, fdObj, IO_fd_fdID, fd);
+ }
+ 
 diff --git a/jdk/src/solaris/native/java/util/FileSystemPreferences.c b/jdk/src/solaris/native/java/util/FileSystemPreferences.c
 index 757f64c34f..f8fd7999b3 100644
 --- a/jdk/src/solaris/native/java/util/FileSystemPreferences.c

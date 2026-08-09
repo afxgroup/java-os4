@@ -111,10 +111,14 @@ processes started at all.
   silently included the `sun.nio.fs.chdirAllowed` BUILDING.md tells people to
   pass, which had therefore never once arrived. `java` is now a real program
   ([`src/launcher/java.c`](src/launcher/java.c)) that hands argv to the VM as an
-  array, so nothing re-parses it. Two things fell out of doing it properly: it
+  array, so nothing re-parses it. Three things fell out of doing it properly: it
   no longer leaves `LD_LIBRARY_PATH` and `JAVA_HOME` set **globally** in `ENV:`
-  after exiting (AmigaDOS `SetEnv` is system-wide and persistent), and it
-  returns the VM's own exit code, so scripts testing `$RC` get a real answer.
+  after exiting (AmigaDOS `SetEnv` is system-wide and persistent); it returns the
+  VM's own exit code, so scripts testing `$RC` get a real answer; and it locates
+  the runtime by resolving its **own** directory at startup rather than assuming
+  `JAVA:`, so an installation can be moved or kept in more than one place. (The
+  absolute `-rpath=JAVA:Sobjs` in every shipped `.so` still assumes `JAVA:`, so
+  that is not yet fully true — the launcher no longer adds to the problem.)
 - **Threads could not be stopped, so exiting killed them** — `pthread_kill`
   cannot interrupt a thread running bytecode on AmigaOS, so the VM had been
   taking threads down from outside. That crashed in `pthread 6` on every clean
