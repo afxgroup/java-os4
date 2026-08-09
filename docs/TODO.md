@@ -101,6 +101,35 @@ runtime-package trouble -- but it disables a security check and should be a
 deliberate, isolated, reversible commit rather than something buried in a build
 script.
 
+## The heap never grows, so the default has to be right up front
+
+`expandHeap()` is reached from one place only: the allocator, after a collection
+that *still* could not satisfy the allocation which triggered it. With a healthy
+live set that never happens -- during a TLS download every collection returned
+about 97% of the heap -- so the heap stays at `min_heap` for the life of the VM.
+`min_heap` is not a starting size here. It is the working size.
+
+That interacted badly with the default, which was `phys_mem/64`: HotSpot's ratio
+for the *initial* heap, but without the GC-time-ratio policy that has HotSpot
+raise it afterwards. On a 1GB machine it meant 16MB for everything, forever.
+
+Measured, since the effect is larger than it sounds. TLS allocates roughly seven
+bytes per byte transferred, so a 77MB download collected **40 times** -- one
+pause every two seconds -- and the rate swung between 250 KB/s and 2 MB/s for an
+average of 1.0. At 128MB the same download collected **twice**, ran 44s instead
+of 78, and held 1.3-1.8 MB/s with not one sample below a quarter of peak. The
+oscillation was never the network; it was the collector.
+
+Now defaulted to `phys_mem/8`, capped at 256MB. That is a workaround with a
+number in it, and it will be wrong for somebody: a long-lived server process
+with a small live set now holds more than it needs, and a workload with a live
+set above 256MB still thrashes exactly as before.
+
+**The real fix** is growth driven by collection *frequency* rather than by
+failure -- if the last few GCs each freed most of the heap and came seconds
+apart, grow. That is the policy JamVM is missing, and with it the default could
+go back to being cautious.
+
 ## Startup is ~11 seconds before the first byte
 
 Down from 25-30 with the entropy fix, and no longer one cause. What is left is
