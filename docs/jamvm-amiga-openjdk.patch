@@ -1,5 +1,5 @@
 diff --git a/src/alloc.c b/src/alloc.c
-index 536c720..385a016 100644
+index 536c720..7f32d9c 100644
 --- a/src/alloc.c
 +++ b/src/alloc.c
 @@ -191,6 +191,12 @@ static VMLock registered_refs_lock;
@@ -139,6 +139,39 @@ index 536c720..385a016 100644
          return NULL;
      }
  
+@@ -2309,7 +2386,32 @@ void *gcMemRealloc(void *addr, int size) {
+         uintptr_t old_size = *--mem;
+         uintptr_t new_size = size + sizeof(uintptr_t);
+ 
++        /*
++         * Grow in place only when the block demonstrably already holds the new
++         * size.
++         *
++         * The test below this one is "do both sizes land in the same page?",
++         * which is sound only where mmap rounds an allocation UP to a whole
++         * page -- as Linux does -- so that a block of 100 bytes really owns
++         * 4096 and can be relabelled as 4000 for free.
++         *
++         * clib4's mmap does not round.  It allocates MMAP_PAGE_SIZE + len and
++         * spends that extra page on alignment and its own header, so a 100-byte
++         * request owns 100 usable bytes plus whatever alignment slack happens
++         * to be left.  Relabelling it 4000 hands the caller a pointer to memory
++         * it does not own, and the fault comes later, from whoever reads the
++         * far end -- which is why this presented as an intermittent DSI inside
++         * findHashedUtf8 during class loading, at an entry index near the top
++         * of a hash table that resizeHash had just "grown".
++         *
++         * Shrinking is always safe: the block is at least old_size already.
++         * Growing takes the allocate-copy-free path below, every time.
++         */
++#ifdef __amigaos4__
++        if(new_size <= old_size) {
++#else
+         if(old_size/sys_page_size == new_size/sys_page_size) {
++#endif
+             *mem = new_size;
+             return addr;
+         } else {
 diff --git a/src/class.c b/src/class.c
 index af81530..0523294 100644
 --- a/src/class.c
