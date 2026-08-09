@@ -58,6 +58,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef __amigaos4__
+#include <proto/dos.h>
+#endif
+
 /* Same three -D's as src/version/verstag.c, so `Version JAVA:java` and
    `Version JAVA:jamvm-openjdk` cannot disagree about what is installed. */
 #ifndef JAVAOS4_VER
@@ -73,11 +77,71 @@
 const char __attribute__((used)) java_launcher_verstag[] =
     "$VER: java " JAVAOS4_VER " (" JAVAOS4_DATE ") OpenJDK " JAVAOS4_JAVAVER;
 
-/* The VM binary, next to us.  PROGDIR: is resolved by DOS against the running
-   program's own directory, so this follows the installation wherever it is put
-   -- and resolves to the same drawer for the child, which lives beside us. */
-#define VM_PROGRAM "PROGDIR:jamvm-openjdk"
-#define VM_SOBJS   "PROGDIR:Sobjs"
+/*
+ * Where the runtime is, if we cannot work it out.
+ *
+ * "PROGDIR:jamvm-openjdk" cannot be used as the program to spawn, which is not
+ * obvious and cost a release to find:
+ *
+ *     PROGDIR:jamvm-openjdk: Comando sconosciuto
+ *
+ * PROGDIR: is per-process, resolved from the running program's home directory.
+ * The command name has to be resolved BEFORE the new program is loaded, in a
+ * context where no such home directory exists yet, so DOS cannot expand it and
+ * reports the whole string as an unknown command.  (It works fine inside
+ * LD_LIBRARY_PATH, which the child's own loader expands once the child is
+ * running -- that is why the old script got away with it.)
+ *
+ * So PROGDIR: is resolved HERE, where this program is running and it does mean
+ * something, and spawnv is handed an absolute path.  JAVA: is the fallback, and
+ * is what the installer uses.
+ */
+#define FALLBACK_HOME "JAVA:"
+#define VM_BINARY     "jamvm-openjdk"
+#define SOBJS_DIR     "Sobjs"
+
+static char vm_program[512];
+static char vm_sobjs[512];
+
+/*
+ * AddPart()'s rule, written out so the host test exercises the same code that
+ * ships.  NameFromLock returns either a volume ("Work:") or a path within one
+ * ("Work:Java"); a separator belongs between the two only in the second case,
+ * since "Work:/jamvm-openjdk" means the parent of Work: on AmigaOS.
+ */
+static void join_path(char *dst, size_t size, const char *dir, const char *leaf) {
+    size_t n = strlen(dir);
+    int needs_slash = (n > 0 && dir[n - 1] != ':' && dir[n - 1] != '/');
+
+    snprintf(dst, size, "%s%s%s", dir, needs_slash ? "/" : "", leaf);
+}
+
+/* Our own directory, absolute.  Zero if it cannot be determined -- on the host,
+   always, which is how the test reaches the fallback. */
+static int program_dir(char *buf, size_t size) {
+#ifdef __amigaos4__
+    BPTR lock = GetProgramDir();
+
+    if(lock != ZERO && NameFromLock(lock, (STRPTR)buf, (LONG)size) != 0) {
+        return 1;
+    }
+#else
+    (void)buf;
+    (void)size;
+#endif
+    return 0;
+}
+
+static void resolve_paths(void) {
+    char dir[400];
+
+    if(!program_dir(dir, sizeof(dir))) {
+        snprintf(dir, sizeof(dir), "%s", FALLBACK_HOME);
+    }
+
+    join_path(vm_program, sizeof(vm_program), dir, VM_BINARY);
+    join_path(vm_sobjs, sizeof(vm_sobjs), dir, SOBJS_DIR);
+}
 
 /*
  * Point the ELF loader at the bundled sobjs.
@@ -96,29 +160,29 @@ static void set_library_path(void) {
     const char *existing = getenv("LD_LIBRARY_PATH");
 
     if(existing == NULL || existing[0] == '\0') {
-        setenv("LD_LIBRARY_PATH", VM_SOBJS, 1);
+        setenv("LD_LIBRARY_PATH", vm_sobjs, 1);
         return;
     }
 
     /* Already ours at the front?  Leave it alone rather than growing the
        variable on every nested launch. */
-    if(strncmp(existing, VM_SOBJS, sizeof(VM_SOBJS) - 1) == 0) {
+    if(strncmp(existing, vm_sobjs, strlen(vm_sobjs)) == 0) {
         return;
     }
 
     {
-        size_t len = sizeof(VM_SOBJS) + strlen(existing) + 1;  /* +1 for ';' */
+        size_t len = strlen(vm_sobjs) + strlen(existing) + 2;  /* ';' and NUL */
         char *combined = malloc(len);
 
         if(combined == NULL) {
             /* Out of memory before the VM has even started: ours alone still
                gives a working runtime, which is better than failing here. */
-            setenv("LD_LIBRARY_PATH", VM_SOBJS, 1);
+            setenv("LD_LIBRARY_PATH", vm_sobjs, 1);
             return;
         }
 
         /* ';' -- path.separator on AmigaOS, where ':' is the volume separator. */
-        snprintf(combined, len, "%s;%s", VM_SOBJS, existing);
+        snprintf(combined, len, "%s;%s", vm_sobjs, existing);
         setenv("LD_LIBRARY_PATH", combined, 1);
         free(combined);
     }
@@ -136,13 +200,15 @@ int main(int argc, char *argv[]) {
      * through would put the launcher's name in front of the VM's arguments,
      * where it would be read as the main class.
      */
+    resolve_paths();
+
     child = malloc((argc + 1) * sizeof(*child));
     if(child == NULL) {
         fprintf(stderr, "java: out of memory building the command line\n");
         return 1;
     }
 
-    child[0] = VM_PROGRAM;
+    child[0] = vm_program;
     for(i = 1; i < argc; i++) {
         child[i] = argv[i];
     }
@@ -156,13 +222,15 @@ int main(int argc, char *argv[]) {
      * not return to the prompt while Java is still running, and the exit code
      * below is the VM's own -- scripts testing $RC get the real answer.
      */
-    status = spawnv(P_WAIT, VM_PROGRAM, child);
+    status = spawnv(P_WAIT, vm_program, child);
 
     if(status == -1) {
         /* The common cause by far is a broken installation -- `java` copied
            somewhere without the rest of the runtime beside it -- so say which
-           file was not found rather than printing strerror alone. */
-        fprintf(stderr, "java: cannot start %s: %s\n", VM_PROGRAM, strerror(errno));
+           file was not found rather than printing strerror alone.  Printing the
+           RESOLVED path matters: the whole class of bug here is a path that
+           looked right in the source and did not survive being resolved. */
+        fprintf(stderr, "java: cannot start %s: %s\n", vm_program, strerror(errno));
         fprintf(stderr, "java: the runtime must sit in the same drawer as this program\n");
         free(child);
         return 127;   /* what a shell reports for "command not found" */

@@ -197,10 +197,14 @@ if command -v cc >/dev/null 2>&1; then
 fi
 
 echo "=== compiling java launcher (static) ==="
-ppc-amigaos-gcc -mcrt=clib4 -O2 -Wall -Wextra \
+# __USE_INLINE__ + -lauto: the launcher calls GetProgramDir()/NameFromLock() to
+# resolve its own directory, since PROGDIR: cannot be used as the name of a
+# program to spawn (it is resolved before the program is loaded, so there is no
+# home directory for it to mean).  -lauto opens dos.library on first use.
+ppc-amigaos-gcc -mcrt=clib4 -O2 -Wall -Wextra -D__USE_INLINE__ \
     -DJAVAOS4_VER="\"$PVER\"" -DJAVAOS4_JAVAVER="\"$JVER\"" \
     -DJAVAOS4_DATE="\"$JDATE\"" \
-    -o "$DEST/java" "$PROJECT_ROOT/src/launcher/java.c"
+    -o "$DEST/java" "$PROJECT_ROOT/src/launcher/java.c" -lauto
 
 if ppc-amigaos-readelf -d "$DEST/java" 2>/dev/null | grep -qi "NEEDED"; then
     echo "ERROR: the java launcher has dynamic dependencies; it must be static." >&2

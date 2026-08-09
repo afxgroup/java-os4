@@ -77,7 +77,41 @@ static void run(char *const *argv, int argc) {
 }
 
 int main(void) {
-    printf("java launcher -- argument passing\n\n");
+    /*
+     * Path resolution first, because a wrong path here does not produce a
+     * subtle bug -- it produces "PROGDIR:jamvm-openjdk: Comando sconosciuto"
+     * and a runtime that cannot start at all, which is what shipped once.
+     *
+     * PROGDIR: must never reach spawnv: the command name is resolved before the
+     * new program is loaded, so there is no home directory for it to mean.
+     */
+    printf("java launcher -- path resolution\n\n");
+    {
+        char buf[128];
+
+        join_path(buf, sizeof(buf), "Work:Java", "jamvm-openjdk");
+        check(strcmp(buf, "Work:Java/jamvm-openjdk") == 0,
+              "join: a drawer gets a '/' before the leaf");
+
+        join_path(buf, sizeof(buf), "Work:", "jamvm-openjdk");
+        check(strcmp(buf, "Work:jamvm-openjdk") == 0,
+              "join: a volume does NOT ('Work:/x' is the parent of Work:)");
+
+        join_path(buf, sizeof(buf), "Work:Java/", "Sobjs");
+        check(strcmp(buf, "Work:Java/Sobjs") == 0,
+              "join: an existing trailing '/' is not doubled");
+
+        /* The host cannot ask DOS, so this exercises the fallback. */
+        resolve_paths();
+        check(strcmp(vm_program, "JAVA:jamvm-openjdk") == 0,
+              "fallback: JAVA:jamvm-openjdk when the program dir is unknown");
+        check(strcmp(vm_sobjs, "JAVA:Sobjs") == 0,
+              "fallback: JAVA:Sobjs likewise");
+        check(strstr(vm_program, "PROGDIR:") == NULL,
+              "PROGDIR: never reaches spawnv (it cannot be resolved there)");
+    }
+
+    printf("\njava launcher -- argument passing\n\n");
 
     /*
      * The bug this program exists to prevent.  '=' must arrive as ONE token:
@@ -90,7 +124,7 @@ int main(void) {
         run(argv, 5);
 
         check(recorded_argc == 5, "-Dk=v: five elements reach spawnv");
-        check(strcmp(recorded_argv[0], VM_PROGRAM) == 0,
+        check(strcmp(recorded_argv[0], vm_program) == 0,
               "-Dk=v: element 0 is the VM, not our own argv[0]");
         check(strcmp(recorded_argv[1], "-Djava.security.debug=provider") == 0,
               "-Dk=v: the property arrives whole, '=' intact");
@@ -120,7 +154,7 @@ int main(void) {
         run(argv, 1);
 
         check(recorded_argc == 1, "no args: the VM is still spawned");
-        check(strcmp(recorded_file, VM_PROGRAM) == 0,
+        check(strcmp(recorded_file, vm_program) == 0,
               "no args: spawnv is told which program to run");
     }
 
@@ -146,14 +180,14 @@ int main(void) {
         unsetenv("LD_LIBRARY_PATH");
         launcher_main(2, argv);
         v = getenv("LD_LIBRARY_PATH");
-        check(v != NULL && strcmp(v, VM_SOBJS) == 0,
+        check(v != NULL && strcmp(v, vm_sobjs) == 0,
               "unset: set to the bundled sobjs");
 
         /* Someone else's setting is kept, ours first. */
         setenv("LD_LIBRARY_PATH", "SDK:local/lib", 1);
         launcher_main(2, argv);
         v = getenv("LD_LIBRARY_PATH");
-        check(v != NULL && strncmp(v, VM_SOBJS, strlen(VM_SOBJS)) == 0,
+        check(v != NULL && strncmp(v, vm_sobjs, strlen(vm_sobjs)) == 0,
               "already set: ours goes first");
         check(v != NULL && strstr(v, "SDK:local/lib") != NULL,
               "already set: theirs is kept, not discarded");
@@ -167,7 +201,7 @@ int main(void) {
         {
             int n = 0;
             const char *p = v;
-            while((p = strstr(p, VM_SOBJS)) != NULL) {
+            while((p = strstr(p, vm_sobjs)) != NULL) {
                 n++;
                 p++;
             }
