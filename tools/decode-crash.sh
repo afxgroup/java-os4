@@ -22,7 +22,17 @@
 #
 #     file address = OFF + (.text vaddr + 4)
 #
-# Confirmed against two independent dumps and both libjvm.so and libjava.so: the
+# NOT the same as addr2line's own "-j.text OFFSET", which measures from .text
+# itself and therefore lands 4 bytes early -- close enough to name the right
+# function and wrong enough to name the wrong LINE.  A third dump settled it: the
+# instruction bytes the handler printed at the crash site were found verbatim in
+# the binary, and the address they sit at is section-0 offset + .text + 4.
+#
+# The binary MUST be the one that crashed.  Rebuilding moves .text (it moved by
+# 0x18 between two builds here), and decoding against a later build gives
+# confident, wrong answers rather than obvious nonsense.
+#
+# Confirmed against three independent dumps and both libjvm.so and libjava.so: the
 # frames resolved to functions whose call chain matched the reported one exactly
 # (Jam_SetIntField called from ClassLoader$NativeLibrary.load, under a
 # JVM_DoPrivileged, under initClass).  If a decode ever comes out as nonsense --
