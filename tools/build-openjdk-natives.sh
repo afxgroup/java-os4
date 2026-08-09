@@ -1065,6 +1065,30 @@ for f in $NETSRC_SH; do
         grep -m2 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
     fi
 done
+# sun.net.spi.DefaultProxySelector.
+#
+# Missing it was not a proxy problem: ProxySelector's own class initialiser does
+# Class.forName("sun.net.spi.DefaultProxySelector"), so the UnsatisfiedLinkError
+# from its <clinit> took out java.net.ProxySelector itself, and with it anything
+# that opens a URL.
+#
+# Built from the unmodified Unix source.  Its gconf and gproxy paths are inside
+# __linux__/_ALLBSD_SOURCE, so on AmigaOS init() dlopens two libraries that are
+# not there, gets nothing, and returns JNI_FALSE.  That is the correct answer
+# rather than a degraded one: it means "this platform has no system-wide proxy
+# configuration", and DefaultProxySelector then reads the http.proxyHost /
+# https.proxyHost properties like any other JVM.
+"$BOOT_JDK/bin/javah" -d "$HDR" -classpath "$RTJAR" sun.net.spi.DefaultProxySelector \
+    >/dev/null 2>&1 || true
+if $CC -D_GNU_SOURCE -DDONT_ENABLE_IPV6 $NETINC \
+       -c "$J/src/solaris/native/sun/net/spi/DefaultProxySelector.c" \
+       -o "$OUT/libnet/DefaultProxySelector.o" 2>"$OUT/e"; then
+    netok=$((netok+1)); echo "  DefaultProxySelector.c OK"
+else
+    netfail=$((netfail+1)); echo "  DefaultProxySelector.c FAIL"
+    grep -m4 -E "error:|No such file" "$OUT/e" | sed 's/^/        /'
+fi
+
 if $CC -D_GNU_SOURCE -DDONT_ENABLE_IPV6 $NETINC \
        -c "$PROJECT_ROOT/src/openjdk/amiga_net.c" -o "$OUT/libnet/amiga_net.o" 2>"$OUT/e"; then
     netok=$((netok+1)); echo "  amiga_net.c OK"
@@ -1085,13 +1109,57 @@ fi
 # from here instead of defining itself.  Cheap, and it catches a silent
 # regression in the source list above before it reaches AmigaOS.
 for sym in Java_java_net_PlainSocketImpl_initProto \
-           Java_java_net_PlainSocketImpl_socketCreate initInetAddressIDs; do
+           Java_java_net_PlainSocketImpl_socketCreate initInetAddressIDs \
+           Java_sun_net_spi_DefaultProxySelector_init; do
     if ppc-amigaos-nm -D --defined-only "$OUT/libnet.so" 2>/dev/null | grep -qw "$sym"; then
         echo "    $sym OK"
     else
         echo "    MISSING $sym -- java.net will not work"
     fi
 done
+
+# Every java.net/sun.net native rt.jar DECLARES, against what libnet DEFINES.
+#
+# The same check libmanagement gets, and for the same reason: a native that is
+# never implemented costs nothing until something touches its class, and these
+# classes call their natives from STATIC INITIALISERS -- so the failure is not
+# "this feature is missing" but "this class cannot be loaded", surfacing far
+# from the cause.  sun.net.spi.DefaultProxySelector was reported as
+# "UnsatisfiedLinkError: init" from java.net.ProxySelector's <clinit>, which
+# does Class.forName on it: one absent native took out ProxySelector itself.
+#
+# The expected-missing list is the point of the check -- everything else is a
+# genuine gap.  IPv6 is compiled out (-DDONT_ENABLE_IPV6), so Inet6AddressImpl
+# is never instantiated; NetworkInterface's per-interface queries cannot be
+# reached because getAll() returns an empty array and every getBy*0 returns
+# NULL, so no NetworkInterface object exists to call them on; SdpSupport is
+# Solaris InfiniBand.
+NET_NATIVE_CLASSES="java.net.InetAddress java.net.InetAddressImplFactory \
+java.net.Inet4AddressImpl java.net.Inet4Address java.net.Inet6Address \
+java.net.PlainSocketImpl java.net.DatagramPacket java.net.PlainDatagramSocketImpl \
+java.net.SocketOutputStream java.net.SocketInputStream \
+sun.net.PortConfig sun.net.ExtendedOptionsImpl \
+sun.net.dns.ResolverConfigurationImpl sun.net.spi.DefaultProxySelector"
+
+NETHDR="$OUT/nethdr"; rm -rf "$NETHDR"; mkdir -p "$NETHDR"
+for c in $NET_NATIVE_CLASSES; do
+    "$BOOT_JDK/bin/javah" -d "$NETHDR" -classpath "$RTJAR" "$c" >/dev/null 2>&1 || true
+done
+if [ -n "$(ls "$NETHDR" 2>/dev/null)" ]; then
+    # LC_ALL=C on every stage, not just the first: it has to reach `sort`, or
+    # its collation and comm's disagree and comm rejects the input.
+    grep -h "^JNIEXPORT" -A1 "$NETHDR"/*.h 2>/dev/null \
+        | grep -oE "Java_[A-Za-z0-9_]+" | LC_ALL=C sort -u > "$OUT/e.netdecl"
+    ppc-amigaos-nm -D --defined-only "$OUT/libnet.so" 2>/dev/null \
+        | awk '{print $3}' | LC_ALL=C sort -u > "$OUT/e.netdef"
+    netmissing=$(LC_ALL=C comm -23 "$OUT/e.netdecl" "$OUT/e.netdef" || true)
+    if [ -n "$netmissing" ]; then
+        echo "  java.net natives declared by rt.jar but NOT implemented:"
+        echo "$netmissing" | sed 's/^/    MISSING /'
+    else
+        echo "  all $(wc -l < "$OUT/e.netdecl") java.net natives rt.jar declares are implemented"
+    fi
+fi
 # Anything platform-half that amiga_net.c forgot would show up here.  getErrorString
 # is expected to be missing: it is jni_util.h's, exported by libjava.so, and gets
 # resolved across shared objects at load time like the JNU_* calls.
@@ -1163,11 +1231,13 @@ fi
 # and then throws UnsatisfiedLinkError on first use -- the exact failure this
 # whole block exists to remove.
 if [ -s "$OUT/libmanagement.so" ]; then
-    LC_ALL=C grep -h "^JNIEXPORT" -A1 "$HDR"/sun_management_*.h 2>/dev/null \
-        | grep -oE "Java_sun_management_[A-Za-z0-9_]+" | sort -u > "$OUT/e.declared"
-    LC_ALL=C ppc-amigaos-nm -D --defined-only "$OUT/libmanagement.so" 2>/dev/null \
-        | grep -oE "Java_sun_management_[A-Za-z0-9_]+" | sort -u > "$OUT/e.defined"
-    missing=$(LC_ALL=C comm -23 "$OUT/e.declared" "$OUT/e.defined")
+    # LC_ALL=C has to reach `sort`, not just the first command in the pipeline,
+    # or its collation and comm's disagree and comm rejects the input.
+    grep -h "^JNIEXPORT" -A1 "$HDR"/sun_management_*.h 2>/dev/null \
+        | grep -oE "Java_sun_management_[A-Za-z0-9_]+" | LC_ALL=C sort -u > "$OUT/e.declared"
+    ppc-amigaos-nm -D --defined-only "$OUT/libmanagement.so" 2>/dev/null \
+        | grep -oE "Java_sun_management_[A-Za-z0-9_]+" | LC_ALL=C sort -u > "$OUT/e.defined"
+    missing=$(LC_ALL=C comm -23 "$OUT/e.declared" "$OUT/e.defined" || true)
     if [ -n "$missing" ]; then
         echo "  MGMT natives declared by rt.jar but NOT implemented:"
         echo "$missing" | sed 's/^/    MISSING /'

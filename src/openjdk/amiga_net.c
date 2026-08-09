@@ -276,3 +276,162 @@ Java_java_net_NetworkInterface_getByInetAddress0(JNIEnv *env, jclass cls,
     (void)addr;
     return NULL;
 }
+
+/* ------------------------------------------------------------------------
+ * sun.net.ExtendedOptionsImpl, sun.net.PortConfig,
+ * sun.net.dns.ResolverConfigurationImpl
+ *
+ * All three declare their natives in rt.jar and all three call into them from a
+ * STATIC INITIALISER, which is what makes them worth doing before anything asks
+ * for them: a missing native does not fail the call, it fails the class, and
+ * the failure surfaces wherever the class is first touched rather than where
+ * the feature is used.  sun.net.spi.DefaultProxySelector had exactly this shape
+ * -- java.net.ProxySelector's own <clinit> does
+ * Class.forName("sun.net.spi.DefaultProxySelector"), so one absent native took
+ * out ProxySelector itself, and with it everything that opens a URL.
+ *
+ * Found by javah'ing every java.net/sun.net class in the shipped rt.jar that
+ * declares a native and diffing against what libnet.so defines -- exact names,
+ * rather than waiting for each one to be reported from an application.
+ * ------------------------------------------------------------------------ */
+
+/*
+ * ExtendedOptionsImpl -- Solaris flow control (SO_FLOW_SLA) and the per-socket
+ * TCP keep-alive timers.
+ *
+ * Both answer "not supported", which is a supported answer: the Java side calls
+ * flowSupported()/keepAliveOptionsSupported() precisely so a platform can say
+ * no, and jdk.net.Sockets then reports the option as unavailable instead of
+ * offering it.  The getters and setters still throw if called anyway, because
+ * reaching them after being told no is a caller bug and returning a made-up
+ * value would hide it.
+ */
+JNIEXPORT void JNICALL
+Java_sun_net_ExtendedOptionsImpl_init(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_sun_net_ExtendedOptionsImpl_flowSupported(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_sun_net_ExtendedOptionsImpl_keepAliveOptionsSupported(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return JNI_FALSE;
+}
+
+static void unsupported(JNIEnv *env, const char *what) {
+    JNU_ThrowByName(env, "java/lang/UnsupportedOperationException", what);
+}
+
+JNIEXPORT void JNICALL
+Java_sun_net_ExtendedOptionsImpl_setFlowOption(JNIEnv *env, jclass cls,
+                                               jobject fd, jobject f) {
+    (void)cls; (void)fd; (void)f;
+    unsupported(env, "unsupported socket option: SO_FLOW_SLA");
+}
+
+JNIEXPORT void JNICALL
+Java_sun_net_ExtendedOptionsImpl_getFlowOption(JNIEnv *env, jclass cls,
+                                               jobject fd, jobject f) {
+    (void)cls; (void)fd; (void)f;
+    unsupported(env, "unsupported socket option: SO_FLOW_SLA");
+}
+
+JNIEXPORT void JNICALL
+Java_sun_net_ExtendedOptionsImpl_setTcpKeepAliveProbes(JNIEnv *env, jclass cls,
+                                                       jobject fd, jint v) {
+    (void)cls; (void)fd; (void)v;
+    unsupported(env, "unsupported socket option: TCP_KEEPCNT");
+}
+
+JNIEXPORT void JNICALL
+Java_sun_net_ExtendedOptionsImpl_setTcpKeepAliveTime(JNIEnv *env, jclass cls,
+                                                     jobject fd, jint v) {
+    (void)cls; (void)fd; (void)v;
+    unsupported(env, "unsupported socket option: TCP_KEEPIDLE");
+}
+
+JNIEXPORT void JNICALL
+Java_sun_net_ExtendedOptionsImpl_setTcpKeepAliveIntvl(JNIEnv *env, jclass cls,
+                                                      jobject fd, jint v) {
+    (void)cls; (void)fd; (void)v;
+    unsupported(env, "unsupported socket option: TCP_KEEPINTVL");
+}
+
+JNIEXPORT jint JNICALL
+Java_sun_net_ExtendedOptionsImpl_getTcpKeepAliveProbes(JNIEnv *env, jclass cls,
+                                                       jobject fd) {
+    (void)cls; (void)fd;
+    unsupported(env, "unsupported socket option: TCP_KEEPCNT");
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_sun_net_ExtendedOptionsImpl_getTcpKeepAliveTime(JNIEnv *env, jclass cls,
+                                                     jobject fd) {
+    (void)cls; (void)fd;
+    unsupported(env, "unsupported socket option: TCP_KEEPIDLE");
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_sun_net_ExtendedOptionsImpl_getTcpKeepAliveIntvl(JNIEnv *env, jclass cls,
+                                                      jobject fd) {
+    (void)cls; (void)fd;
+    unsupported(env, "unsupported socket option: TCP_KEEPINTVL");
+    return 0;
+}
+
+/*
+ * PortConfig -- the ephemeral port range, which sun.net.PortConfig reads once
+ * from a static block.
+ *
+ * Linux reads /proc/sys/net/ipv4/ip_local_port_range; AmigaOS exposes no such
+ * knob, so this reports the IANA registered range (49152-65535) that bsdsocket
+ * allocates from.  Two constants rather than a probe: the value is used to
+ * decide whether a port is ephemeral, and being roughly right is what that
+ * needs -- a failed probe returning 0 would make every port look ephemeral.
+ */
+JNIEXPORT jint JNICALL
+Java_sun_net_PortConfig_getLower0(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return 49152;
+}
+
+JNIEXPORT jint JNICALL
+Java_sun_net_PortConfig_getUpper0(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return 65535;
+}
+
+/*
+ * ResolverConfigurationImpl -- the DNS search domain.
+ *
+ * NULL for both, meaning "no domain configured", which is what the Java side
+ * treats as the empty search list.  AmigaOS keeps its resolver settings where
+ * the stack chooses rather than in a resolv.conf this could parse, and an
+ * invented domain would silently rewrite unqualified host lookups into the
+ * wrong names -- a failure far harder to trace than having no search list.
+ */
+JNIEXPORT jstring JNICALL
+Java_sun_net_dns_ResolverConfigurationImpl_localDomain0(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return NULL;
+}
+
+JNIEXPORT jstring JNICALL
+Java_sun_net_dns_ResolverConfigurationImpl_fallbackDomain0(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return NULL;
+}
