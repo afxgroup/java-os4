@@ -825,6 +825,63 @@ index 971ac75..63a5373 100644
 +    TRACE("JVM_KnownToNotExist(loader=%p, name=%s)", loader, classname);
 +    return JNI_FALSE;
 +}
+diff --git a/src/classlib/openjdk/management.c b/src/classlib/openjdk/management.c
+index 822f41e..b24c039 100644
+--- a/src/classlib/openjdk/management.c
++++ b/src/classlib/openjdk/management.c
+@@ -54,9 +54,50 @@ jobject jmm_GetInputArguments(JNIEnv *env) {
+     return NULL;
+ }
+ 
++/*
++ * The arguments the VM was started with -- what RuntimeMXBean.getInputArguments()
++ * reports.  sun.management.VMManagementImpl.getVmArguments0() calls straight
++ * through to here.
++ *
++ * This used to be UNIMPLEMENTED, which returned NULL after printing its own name
++ * on stdout.  Neither half was harmless: RuntimeImpl wraps the result in a List
++ * without checking, so a caller got a null it could not tell from "started with
++ * no arguments", and the trace landed in the middle of the application's own
++ * output.  It only became reachable when libmanagement.so started being built --
++ * before that, getRuntimeMXBean() died earlier, with UnsatisfiedLinkError.
++ *
++ * An EMPTY array when nothing was recorded, never NULL: a VM created through
++ * JNI_CreateJavaVM does not go through parseCommandLine, and "no arguments" is
++ * the truthful answer there rather than a failure.
++ */
+ jobjectArray jmm_GetInputArgumentArray(JNIEnv *env) {
+-    UNIMPLEMENTED("jmm_GetInputArgumentArray");
+-    return NULL;
++    extern char **vm_input_args;
++    extern int vm_input_args_count;
++
++    Class *array_class = findArrayClass(SYMBOL(array_java_lang_String));
++    int count = vm_input_args == NULL ? 0 : vm_input_args_count;
++    Object *array;
++    int i;
++
++    if(array_class == NULL)
++        return NULL;
++
++    array = allocArray(array_class, count, sizeof(Object*));
++    if(array == NULL)
++        return NULL;
++
++    for(i = 0; i < count; i++) {
++        Object *str = createString(vm_input_args[i]);
++
++        if(str == NULL)
++            return NULL;
++
++        /* The body is addressed through `array` on each pass rather than cached
++           in a local, since createString allocates in between. */
++        ARRAY_DATA(array, Object*)[i] = str;
++    }
++
++    return array;
+ }
+ 
+ jobjectArray jmm_GetMemoryPools(JNIEnv *env, jobject obj) {
 diff --git a/src/classlib/openjdk/properties.c b/src/classlib/openjdk/properties.c
 index 2391e61..fc8877e 100644
 --- a/src/classlib/openjdk/properties.c
@@ -941,6 +998,55 @@ index 71fc8aa..0ee57ac 100644
              for(sig = 0; sig < NSIG && !pending_signals[sig]; sig++);
          } while(sig == NSIG);
  
+diff --git a/src/classlib/openjdk/trace.h b/src/classlib/openjdk/trace.h
+index ce3041b..739e599 100644
+--- a/src/classlib/openjdk/trace.h
++++ b/src/classlib/openjdk/trace.h
+@@ -21,19 +21,39 @@
+ #if 1
+ #define TRACE(fmt, ...)
+ #else
+-#define TRACE(fmt, ...) { printf(fmt "\n", ## __VA_ARGS__); fflush(stdout); }
++/* jam_printf, not printf -- see the note below.  This branch is off, but
++   turning it on should not start writing into the application's output. */
++#define TRACE(fmt, ...) jam_printf(fmt "\n", ## __VA_ARGS__)
+ #endif
+ 
++/*
++ * These four are developer traces, and the #if 0 above means they are ON in
++ * every build, including released ones.  They used to write with printf(), i.e.
++ * straight into the APPLICATION's stdout -- so a program that touched an
++ * unimplemented corner of the management interface got a bare
++ *
++ *     jmm_GetInputArgumentArray
++ *
++ * in the middle of its own output, attributable to nothing.  That is a real
++ * fault in a runtime, not merely untidy: an application whose output is parsed
++ * by something else gets corrupted by a line it never wrote.
++ *
++ * jam_printf instead, which is where every other VM diagnostic already goes --
++ * through args->vfprintf, which on AmigaOS is the serial debug log.  The traces
++ * keep their whole value to whoever is debugging the VM, and leave the
++ * application's stdout alone.  Left enabled deliberately: they are how an
++ * unimplemented jmm call gets noticed at all, and the reason this one was.
++ */
+ #if 0
+ #define TBD(fmt, ...)
+ #define UNUSED(fmt, ...)
+ #define DEPRECATED(fmt, ...)
+ #define UNIMPLEMENTED(fmt, ...)
+ #else
+-#define TBD(fmt, ...) { printf(fmt "\n", ## __VA_ARGS__); fflush(stdout); }
+-#define UNUSED(fmt, ...) { printf(fmt "\n", ## __VA_ARGS__); fflush(stdout); }
+-#define DEPRECATED(fmt, ...) { printf(fmt "\n", ## __VA_ARGS__); fflush(stdout); }
+-#define UNIMPLEMENTED(fmt, ...) { printf(fmt "\n", ## __VA_ARGS__); fflush(stdout); }
++#define TBD(fmt, ...) jam_printf(fmt "\n", ## __VA_ARGS__)
++#define UNUSED(fmt, ...) jam_printf(fmt "\n", ## __VA_ARGS__)
++#define DEPRECATED(fmt, ...) jam_printf(fmt "\n", ## __VA_ARGS__)
++#define UNIMPLEMENTED(fmt, ...) jam_printf(fmt "\n", ## __VA_ARGS__)
+ #endif
+ 
+ #define IGNORED(fmt, ...)
 diff --git a/src/config.h b/src/config.h
 index dd2b875..a001b80 100644
 --- a/src/config.h
@@ -1586,7 +1692,7 @@ index e560f69..74fff16 100644
  
  #ifdef DIRECT
 diff --git a/src/jam.c b/src/jam.c
-index 052f84a..607f16c 100644
+index 052f84a..cfd0bf2 100644
 --- a/src/jam.c
 +++ b/src/jam.c
 @@ -32,10 +32,19 @@
@@ -1627,7 +1733,7 @@ index 052f84a..607f16c 100644
      printf("  -D<name>=<value> set a system property\n");
      printf("  -verbose[:class|gc|jni]\n");
      printf("\t\t   :class print out information about class loading, etc.\n");
-@@ -107,15 +120,25 @@ void showVersionAndCopyright() {
+@@ -107,21 +120,46 @@ void showVersionAndCopyright() {
      printf("but WITHOUT ANY WARRANTY; without even the implied warranty of\n");
      printf("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n");
      printf("GNU General Public License for more details.\n");
@@ -1658,7 +1764,38 @@ index 052f84a..607f16c 100644
  }
  
  void showFullVersion() {
-@@ -212,6 +235,18 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+     printf("java full version \"jamvm-%s\"\n", JAVA_COMPAT_VERSION);
+ }
+ 
++/*
++ * The VM options, kept for RuntimeMXBean.getInputArguments().
++ *
++ * jmm_GetInputArgumentArray has to answer with the arguments the VM was given
++ * -- everything before the main class, so `-Xms128M` but not `Main` and not its
++ * arguments.  Nothing was recording them, and the stub returned NULL, which
++ * getInputArguments() then wraps in a List and hands back as a null a caller
++ * cannot distinguish from "no arguments".
++ *
++ * Pointers into argv rather than copies: argv outlives the VM.  Only argv[i] --
++ * the main class, past the end of this range -- is ever rewritten (for -jar).
++ */
++char **vm_input_args = NULL;
++int vm_input_args_count = 0;
++
+ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+     Property props[argc-1];
+     int is_jar = FALSE;
+@@ -132,6 +170,9 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+ 
+     for(i = 1; i < argc; i++) {
+         if(*argv[i] != '-') {
++            /* First non-option: everything before it was for the VM. */
++            vm_input_args = &argv[1];
++            vm_input_args_count = i - 1;
+             if(args->min_heap > args->max_heap) {
+                 printf("Minimum heap size greater than max!\n");
+                 status = 1;
+@@ -212,6 +253,18 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
                  } else if(strncmp(argv[i], "-Xbootclasspath/v:", 18) == 0) {
                      args->bootpath_v = argv[i] + 18;
  
@@ -1677,7 +1814,7 @@ index 052f84a..607f16c 100644
                  /* Compatibility options */
                  } else if(strcmp(argv[i], "-client") == 0 ||
                            strcmp(argv[i], "-server") == 0) {
-@@ -251,10 +286,40 @@ int main(int argc, char *argv[]) {
+@@ -251,10 +304,40 @@ int main(int argc, char *argv[]) {
          exit(1);
      }
  
@@ -1719,7 +1856,7 @@ index 052f84a..607f16c 100644
  
      for(cpntr = argv[class_arg]; *cpntr; cpntr++)
          if(*cpntr == '.')
-@@ -301,6 +366,5 @@ error:
+@@ -301,6 +384,5 @@ error:
      mainThreadWaitToExitVM();
      exitVM(status);
  
