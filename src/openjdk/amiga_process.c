@@ -68,13 +68,16 @@
 extern struct ExecIFace *IExec;
 static struct DOSIFace *dosIFace;
 
-static struct DOSIFace *dosInterface(void) {
-    if(dosIFace == NULL) {
+static struct DOSIFace *dosInterface(void)
+{
+    if (dosIFace == NULL)
+    {
         struct Library *base = IExec->OpenLibrary("dos.library", 50);
 
-        if(base != NULL) {
+        if (base != NULL)
+        {
             dosIFace = (struct DOSIFace *)
-                IExec->GetInterface(base, "main", 1, NULL);
+                           IExec->GetInterface(base, "main", 1, NULL);
         }
     }
     return dosIFace;
@@ -95,16 +98,19 @@ static struct DOSIFace *dosInterface(void) {
  * are copied out rather than decoded.  Returns NULL for a NULL array, which is
  * meaningful for `dir` (no chdir) and `envBlock` (inherit).
  */
-static char *bytesToCString(JNIEnv *env, jbyteArray arr) {
+static char *bytesToCString(JNIEnv *env, jbyteArray arr)
+{
     jsize len;
     char *out;
 
-    if (arr == NULL) {
+    if (arr == NULL)
+    {
         return NULL;
     }
 
     len = (*env)->GetArrayLength(env, arr);
-    if ((out = malloc((size_t)len + 1)) == NULL) {
+    if ((out = malloc((size_t)len + 1)) == NULL)
+    {
         return NULL;
     }
 
@@ -118,18 +124,22 @@ static char *bytesToCString(JNIEnv *env, jbyteArray arr) {
  * strings back to back.  Point into the copied block rather than copying again;
  * the caller frees the block once, after the spawn.
  */
-static void initVectorFromBlock(const char **vec, char *block, int count) {
+static void initVectorFromBlock(const char **vec, char *block, int count)
+{
     char *p = block;
     int i;
 
-    for (i = 0; i < count; i++) {
+    for (i = 0; i < count; i++)
+    {
         vec[i] = p;
         p += strlen(p) + 1;
     }
 }
 
-static void closeSafe(int fd) {
-    if (fd >= 0) {
+static void closeSafe(int fd)
+{
+    if (fd >= 0)
+    {
         close(fd);
     }
 }
@@ -149,11 +159,14 @@ static void closeSafe(int fd) {
  * handles per exec that never go away, and they also hold the write ends open,
  * so the parent's reader never sees EOF.
  */
-static void dontInherit(int fd) {
-    if (fd >= 0) {
+static void dontInherit(int fd)
+{
+    if (fd >= 0)
+    {
         int flags = fcntl(fd, F_GETFD, 0);
 
-        if (flags >= 0) {
+        if (flags >= 0)
+        {
             fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
         }
     }
@@ -176,7 +189,8 @@ static void dontInherit(int fd) {
  * the descriptor table is ever reorganised.
  */
 JNIEXPORT jint JNICALL
-Java_java_lang_AmigaDiag_openFdCount(JNIEnv *env, jclass clazz) {
+Java_java_lang_AmigaDiag_openFdCount(JNIEnv *env, jclass clazz)
+{
     int i, count = 0;
 
     (void)env;
@@ -184,8 +198,10 @@ Java_java_lang_AmigaDiag_openFdCount(JNIEnv *env, jclass clazz) {
 
     /* Well past anything this runtime opens; the scan is cheap and only runs
        when a test asks for it. */
-    for (i = 0; i < 1024; i++) {
-        if (fcntl(i, F_GETFD) >= 0) {
+    for (i = 0; i < 1024; i++)
+    {
+        if (fcntl(i, F_GETFD) >= 0)
+        {
             count++;
         }
     }
@@ -217,15 +233,18 @@ Java_java_lang_AmigaDiag_openFdCount(JNIEnv *env, jclass clazz) {
  * tethered spawn, with pipes and a real exit status, for a caller whose parent
  * outlives the child.
  */
-static int detachedSpawn(void) {
+static int detachedSpawn(void)
+{
     static int cached = -1;
 
-    if(cached < 0) {
+    if (cached < 0)
+    {
         /* Read once: this is per-VM policy, not per-call. */
         const char *v = getenv("AMIGA_PROCESS_DETACHED");
 
         cached = (v != NULL && (v[0] == '0' || v[0] == 'n' || v[0] == 'N'))
-                 ? 0 : 1;
+                     ? 0
+                     : 1;
     }
     return cached;
 }
@@ -238,61 +257,59 @@ static int detachedSpawn(void) {
  * other DOS call in between overwrites it.
  */
 static int spawnDetached(const char *program, const char *const *argv,
-                         int argc, const char *cwd) {
+                         int argc, const char *cwd)
+{
     struct DOSIFace *dos = dosInterface();
     char *command;
     BPTR cwdLock = ZERO;
-    BPTR nilIn, nilOut, nilErr;
     LONG rc;
     int pid;
 
-    if(dos == NULL) {
+    if (dos == NULL)
+    {
         errno = ENOSYS;
         return -1;
     }
 
     command = amiga_build_command(program, argv, argc);
-    if(command == NULL) {
+    if (command == NULL)
+    {
         errno = ENOMEM;
         return -1;
     }
 
-    if(cwd != NULL) {
+    if (cwd != NULL)
+    {
         cwdLock = dos->Lock(cwd, SHARED_LOCK);
     }
-
-    /* Its own stdio, not ours.  SYS_Asynch makes DOS close these itself. */
-    nilIn  = dos->Open("NIL:", MODE_OLDFILE);
-    nilOut = dos->Open("NIL:", MODE_NEWFILE);
-    nilErr = dos->Open("NIL:", MODE_NEWFILE);
-
+    IExec->DebugPrintF("[AMIGA_PROCESS] spawnDetached: %s\n", command);
     rc = dos->SystemTags(command,
-                    SYS_Input,      nilIn,
-                    SYS_Output,     nilOut,
-                    SYS_Error,      nilErr,
-                    SYS_UserShell,  TRUE,
-                    SYS_Asynch,     TRUE,
-                    cwdLock ? NP_CurrentDir : TAG_IGNORE, cwdLock,
-                    TAG_DONE);
-    pid = (int)dos->IoErr();       /* before any other DOS call */
-
+                         SYS_Input,     0,
+                         SYS_Output,    0,
+                         SYS_Error,     0,
+                         SYS_Asynch,    TRUE,
+                         NP_CopyVars,   TRUE,
+                         NP_Child,      TRUE,
+                         NP_StackSize,  8191875,
+                         cwdLock ? NP_CurrentDir : TAG_IGNORE, cwdLock,
+                         TAG_DONE);
+    pid = (int)dos->IoErr(); /* before any other DOS call */
+    IExec->DebugPrintF("[AMIGA_PROCESS] spawnDetached: rc=%ld, pid=%d\n", rc, pid);
     free(command);
 
-    if(rc != 0) {
-        /* SYS_Asynch hands the handles to DOS only on success; on failure they
-           are still ours, and the lock always is. */
-        if(nilIn)  dos->Close(nilIn);
-        if(nilOut) dos->Close(nilOut);
-        if(nilErr) dos->Close(nilErr);
-        if(cwdLock) dos->UnLock(cwdLock);
+    if (rc != 0)
+    {
+        if (cwdLock)
+            dos->UnLock(cwdLock);
         errno = EINVAL;
         return -1;
     }
 
-    if(cwdLock) {
+    if (cwdLock)
+    {
         dos->UnLock(cwdLock);
     }
-    return pid > 0 ? pid : 1;      /* a pid Java can hold; never 0 */
+    return pid > 0 ? pid : 1; /* a pid Java can hold; never 0 */
 }
 
 /* ---- natives -------------------------------------------------------- */
@@ -304,7 +321,8 @@ static int spawnDetached(const char *program, const char *const *argv,
  * its own table, which is what waitpid consults.
  */
 JNIEXPORT void JNICALL
-Java_java_lang_UNIXProcess_init(JNIEnv *env, jclass clazz) {
+Java_java_lang_UNIXProcess_init(JNIEnv *env, jclass clazz)
+{
     (void)env;
     (void)clazz;
 }
@@ -317,50 +335,57 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
                                        jbyteArray envBlock, jint envc,
                                        jbyteArray dir,
                                        jintArray std_fds,
-                                       jboolean redirectErrorStream) {
+                                       jboolean redirectErrorStream)
+{
     char *pprog = NULL, *pargBlock = NULL, *penvBlock = NULL, *pdir = NULL;
     const char **argv = NULL;
     const char **envv = NULL;
     jint *fds = NULL;
     /* [0] = read end, [1] = write end, as pipe(2) fills them. */
-    int in[2]  = { -1, -1 };
-    int out[2] = { -1, -1 };
-    int err[2] = { -1, -1 };
+    int in[2] = {-1, -1};
+    int out[2] = {-1, -1};
+    int err[2] = {-1, -1};
     int childIn = -1, childOut = -1, childErr = -1;
     jint resultPid = -1;
 
     (void)process;
-    (void)mode;        /* no launch mechanisms to choose between here */
-    (void)helperpath;  /* jspawnhelper is not used */
+    (void)mode;       /* no launch mechanisms to choose between here */
+    (void)helperpath; /* jspawnhelper is not used */
 
-    if ((pprog = bytesToCString(env, prog)) == NULL) {
+    if ((pprog = bytesToCString(env, prog)) == NULL)
+    {
         goto Catch;
     }
     pargBlock = bytesToCString(env, argBlock);
     penvBlock = bytesToCString(env, envBlock);
-    pdir      = bytesToCString(env, dir);
+    pdir = bytesToCString(env, dir);
 
     /* argv[0] is the program name and is NOT part of the command line --
        spawnvpe skips it exactly as execv would.  Then argc arguments, then
        the NULL terminator. */
-    if ((argv = malloc(sizeof(char *) * ((size_t)argc + 2))) == NULL) {
+    if ((argv = malloc(sizeof(char *) * ((size_t)argc + 2))) == NULL)
+    {
         goto Catch;
     }
     argv[0] = pprog;
-    if (pargBlock != NULL) {
+    if (pargBlock != NULL)
+    {
         initVectorFromBlock(argv + 1, pargBlock, argc);
     }
     argv[argc + 1] = NULL;
 
-    if (penvBlock != NULL) {
-        if ((envv = malloc(sizeof(char *) * ((size_t)envc + 1))) == NULL) {
+    if (penvBlock != NULL)
+    {
+        if ((envv = malloc(sizeof(char *) * ((size_t)envc + 1))) == NULL)
+        {
             goto Catch;
         }
         initVectorFromBlock(envv, penvBlock, envc);
         envv[envc] = NULL;
     }
 
-    if ((fds = (*env)->GetIntArrayElements(env, std_fds, NULL)) == NULL) {
+    if ((fds = (*env)->GetIntArrayElements(env, std_fds, NULL)) == NULL)
+    {
         goto Catch;
     }
 
@@ -369,7 +394,8 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
      * descriptor to hand straight to the child (ProcessBuilder redirecting to
      * a file).  Each pipe gives the child one end and keeps the other.
      */
-    if (detachedSpawn()) {
+    if (detachedSpawn())
+    {
         /*
          * DETACHED: no pipes, and nothing else of ours either.
          *
@@ -388,37 +414,54 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
          * and whose parent will outlive it.
          */
         childIn = childOut = childErr = -1;
-    } else if (fds[0] == -1) {
-        if (pipe(in) < 0) {
+    }
+    else if (fds[0] == -1)
+    {
+        if (pipe(in) < 0)
+        {
             goto CatchIO;
         }
-        childIn = in[0];                        /* child reads its stdin */
-        dontInherit(in[1]);                    /* ours; not the child's */
-    } else {
+        childIn = in[0];    /* child reads its stdin */
+        dontInherit(in[1]); /* ours; not the child's */
+    }
+    else
+    {
         childIn = fds[0];
     }
 
-    if (!detachedSpawn() && fds[1] == -1) {
-        if (pipe(out) < 0) {
+    if (!detachedSpawn() && fds[1] == -1)
+    {
+        if (pipe(out) < 0)
+        {
             goto CatchIO;
         }
-        childOut = out[1];                      /* child writes its stdout */
-        dontInherit(out[0]);                    /* ours; not the child's */
-    } else if (!detachedSpawn()) {
+        childOut = out[1];   /* child writes its stdout */
+        dontInherit(out[0]); /* ours; not the child's */
+    }
+    else if (!detachedSpawn())
+    {
         childOut = fds[1];
     }
 
-    if (detachedSpawn()) {
+    if (detachedSpawn())
+    {
         /* already -1: NIL: on all three */
-    } else if (redirectErrorStream) {
+    }
+    else if (redirectErrorStream)
+    {
         childErr = childOut;
-    } else if (fds[2] == -1) {
-        if (pipe(err) < 0) {
+    }
+    else if (fds[2] == -1)
+    {
+        if (pipe(err) < 0)
+        {
             goto CatchIO;
         }
         childErr = err[1];
-        dontInherit(err[0]);                    /* ours; not the child's */
-    } else {
+        dontInherit(err[0]); /* ours; not the child's */
+    }
+    else
+    {
         childErr = fds[2];
     }
 
@@ -437,19 +480,23 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
      * Two live translations at once is within the buffer ring (4), and holding
      * both is exactly what it exists for.
      */
-    if(detachedSpawn()) {
+    if (detachedSpawn())
+    {
         /* argv[0] is the program name by execv convention; the command line
            takes the program separately, so skip it here or it appears twice. */
         resultPid = (jint)spawnDetached(amiga_path(pprog),
-                               (const char *const *)(argv + 1), argc,
-                               pdir != NULL ? amiga_path(pdir) : NULL);
-    } else {
+                                        (const char *const *)(argv + 1), argc,
+                                        pdir != NULL ? amiga_path(pdir) : NULL);
+    }
+    else
+    {
         resultPid = (jint)spawnvpe(amiga_path(pprog), argv, (char **)envv,
-                               pdir != NULL ? amiga_path(pdir) : NULL,
-                               childIn, childOut, childErr);
+                                   pdir != NULL ? amiga_path(pdir) : NULL,
+                                   childIn, childOut, childErr);
     }
 
-    if (resultPid < 0) {
+    if (resultPid < 0)
+    {
         goto CatchIO;
     }
 
@@ -458,9 +505,12 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
      * parent never sees EOF on the child's output, so a read() on stdout would
      * block for good after the child died.
      */
-    if (in[0]  != -1) closeSafe(in[0]);
-    if (out[1] != -1) closeSafe(out[1]);
-    if (err[1] != -1) closeSafe(err[1]);
+    if (in[0] != -1)
+        closeSafe(in[0]);
+    if (out[1] != -1)
+        closeSafe(out[1]);
+    if (err[1] != -1)
+        closeSafe(err[1]);
 
     /* Hand back the parent's ends: write to the child's stdin, read its
        stdout and stderr.  -1 where no pipe was made. */
@@ -475,13 +525,17 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
 CatchIO:
     JNU_ThrowIOExceptionWithLastError(env, "Could not start process");
     /* Only on failure: on success these belong to the child or to Java. */
-    closeSafe(in[0]);  closeSafe(in[1]);
-    closeSafe(out[0]); closeSafe(out[1]);
-    closeSafe(err[0]); closeSafe(err[1]);
+    closeSafe(in[0]);
+    closeSafe(in[1]);
+    closeSafe(out[0]);
+    closeSafe(out[1]);
+    closeSafe(err[0]);
+    closeSafe(err[1]);
     resultPid = -1;
 
 Catch:
-    if (fds != NULL) {
+    if (fds != NULL)
+    {
         (*env)->ReleaseIntArrayElements(env, std_fds, fds, JNI_ABORT);
     }
 
@@ -525,7 +579,8 @@ Finally:
 #define DRAIN_MAX (256 * 1024)
 
 JNIEXPORT jbyteArray JNICALL
-Java_java_lang_UNIXProcess_drainPipe0(JNIEnv *env, jclass clazz, jint fd) {
+Java_java_lang_UNIXProcess_drainPipe0(JNIEnv *env, jclass clazz, jint fd)
+{
     char *buf = NULL;
     size_t cap = 8192, len = 0;
     int flags, restore = 0;
@@ -533,38 +588,46 @@ Java_java_lang_UNIXProcess_drainPipe0(JNIEnv *env, jclass clazz, jint fd) {
 
     (void)clazz;
 
-    if (fd < 0) {
+    if (fd < 0)
+    {
         return NULL;
     }
 
     if ((flags = fcntl(fd, F_GETFL, 0)) >= 0 &&
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0) {
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0)
+    {
         restore = 1;
     }
     /* If the flag would not take, read anyway: at worst we block once on a
        pipe that has data, which is what the caller wanted regardless. */
 
-    if ((buf = malloc(cap)) == NULL) {
+    if ((buf = malloc(cap)) == NULL)
+    {
         goto done;
     }
 
-    for (;;) {
+    for (;;)
+    {
         ssize_t n;
 
-        if (len == cap) {
+        if (len == cap)
+        {
             char *bigger;
-            if (cap >= DRAIN_MAX) {
-                break;                  /* enough; the rest is the child's loss */
+            if (cap >= DRAIN_MAX)
+            {
+                break; /* enough; the rest is the child's loss */
             }
             cap *= 2;
-            if ((bigger = realloc(buf, cap)) == NULL) {
-                break;                  /* keep what we have */
+            if ((bigger = realloc(buf, cap)) == NULL)
+            {
+                break; /* keep what we have */
             }
             buf = bigger;
         }
 
         n = read(fd, buf + len, cap - len);
-        if (n > 0) {
+        if (n > 0)
+        {
             len += (size_t)n;
             continue;
         }
@@ -574,12 +637,15 @@ Java_java_lang_UNIXProcess_drainPipe0(JNIEnv *env, jclass clazz, jint fd) {
     }
 
 done:
-    if (restore) {
+    if (restore)
+    {
         fcntl(fd, F_SETFL, flags);
     }
 
-    if (len > 0) {
-        if ((result = (*env)->NewByteArray(env, (jsize)len)) != NULL) {
+    if (len > 0)
+    {
+        if ((result = (*env)->NewByteArray(env, (jsize)len)) != NULL)
+        {
             (*env)->SetByteArrayRegion(env, result, 0, (jsize)len, (jbyte *)buf);
         }
     }
@@ -600,7 +666,8 @@ done:
  */
 JNIEXPORT jint JNICALL
 Java_java_lang_UNIXProcess_waitForProcessExit0(JNIEnv *env, jclass clazz,
-                                               jint pid, jint timeoutMillis) {
+                                               jint pid, jint timeoutMillis)
+{
     int status = 0;
     int waited = 0;
     /* 20ms: short enough that Process.waitFor() returns promptly, long enough
@@ -610,13 +677,16 @@ Java_java_lang_UNIXProcess_waitForProcessExit0(JNIEnv *env, jclass clazz,
     (void)env;
     (void)clazz;
 
-    for (;;) {
+    for (;;)
+    {
         pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
 
-        if (r == (pid_t)pid) {
+        if (r == (pid_t)pid)
+        {
             return (jint)status;
         }
-        if (r < 0) {
+        if (r < 0)
+        {
             /* ECHILD: already reaped, never ours -- or DETACHED, which is now
                the default and makes this the ordinary path rather than an edge
                case.  A detached child is not in clib4's child table, so there
@@ -627,7 +697,8 @@ Java_java_lang_UNIXProcess_waitForProcessExit0(JNIEnv *env, jclass clazz,
                status more than they need the child to survive. */
             return 0;
         }
-        if (waited >= timeoutMillis) {
+        if (waited >= timeoutMillis)
+        {
             return NOT_EXITED;
         }
 
@@ -643,13 +714,15 @@ Java_java_lang_UNIXProcess_waitForProcessExit0(JNIEnv *env, jclass clazz,
  */
 JNIEXPORT jint JNICALL
 Java_java_lang_UNIXProcess_waitForProcessExit(JNIEnv *env, jobject process,
-                                              jint pid) {
+                                              jint pid)
+{
     int status = 0;
 
     (void)env;
     (void)process;
 
-    if (waitpid((pid_t)pid, &status, 0) < 0) {
+    if (waitpid((pid_t)pid, &status, 0) < 0)
+    {
         return 0;
     }
     return (jint)status;
@@ -664,7 +737,8 @@ Java_java_lang_UNIXProcess_waitForProcessExit(JNIEnv *env, jobject process,
  */
 JNIEXPORT void JNICALL
 Java_java_lang_UNIXProcess_destroyProcess(JNIEnv *env, jclass clazz,
-                                          jint pid, jboolean force) {
+                                          jint pid, jboolean force)
+{
     (void)env;
     (void)clazz;
     (void)force;

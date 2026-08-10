@@ -551,6 +551,7 @@ for extra in amiga_process amiga_crypto; do
 done
 
 echo "  libjava compile: $ok OK, $fail FAILED"
+TOTAL_COMPILE_FAIL=$((${TOTAL_COMPILE_FAIL:-0} + fail))
 
 # java.lang.Shutdown.beforeHalt(): some 8u drops already provide it; only synthesize
 # the no-op compat stub when the native source does not.
@@ -612,6 +613,7 @@ for c in "$ZLIB"/*.c "$ZIP"/Adler32.c "$ZIP"/CRC32.c "$ZIP"/Deflater.c \
     fi
 done
 echo "  libzip compile: $zok OK, $zfail FAILED"
+TOTAL_COMPILE_FAIL=$((${TOTAL_COMPILE_FAIL:-0} + zfail))
 
 # ZipFile.getManifestNum: native added in later 8u (security: count META-INF/
 # MANIFEST.MF entries); absent from the 8u77 source but Temurin's rt.jar calls it ->
@@ -924,6 +926,7 @@ else
 fi
 
 echo "  libnio compile: $nok OK, $nfail FAILED"
+TOTAL_COMPILE_FAIL=$((${TOTAL_COMPILE_FAIL:-0} + nfail))
 # initInetAddressIDs() and the java.net InetAddress natives used to be faked in
 # here, because libnet.so was a stub.  libnet is real now and net_util.c owns
 # them, so this must NOT define them too: libnio's copies only cached field IDs
@@ -1097,6 +1100,7 @@ else
     grep -m4 -E "error:" "$OUT/e" | sed 's/^/        /'
 fi
 echo "  libnet compile: $netok OK, $netfail FAILED"
+TOTAL_COMPILE_FAIL=$((${TOTAL_COMPILE_FAIL:-0} + netfail))
 
 if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
        -o "$OUT/libnet.so" "$OUT"/libnet/*.o 2>"$OUT/e"; then
@@ -1212,6 +1216,7 @@ else
     grep -m4 -E "error:" "$OUT/e" | sed 's/^/        /'
 fi
 echo "  libmanagement compile: $mgmtok OK, $mgmtfail FAILED"
+TOTAL_COMPILE_FAIL=$((${TOTAL_COMPILE_FAIL:-0} + mgmtfail))
 
 if ppc-amigaos-gcc -mcrt=clib4 -fPIC -shared -Wl,-rpath=JAVA:Sobjs \
        -o "$OUT/libmanagement.so" "$OUT"/libmanagement/*.o 2>"$OUT/e"; then
@@ -1336,6 +1341,7 @@ if [ -d "$EC" ]; then
         fi
     done
     echo "  libsunec compile: $ecok OK, $ecfail FAILED"
+    TOTAL_COMPILE_FAIL=$((${TOTAL_COMPILE_FAIL:-0} + ecfail))
 
     # ECC_JNI.cpp uses new[]/delete[], so the link pulls operator new[]
     # (_Znaj) and operator delete[] (_ZdaPv) from libstdc++.  Upstream just adds
@@ -1366,3 +1372,26 @@ else
 fi
 
 echo "=== built ==="; ls -l "$OUT"/*.a "$OUT"/*.so "$OUT"/niopatch.zip 2>/dev/null
+
+#
+# A file that did not compile must not leave with a library still being shipped.
+#
+# It used to.  Each library counts its failures and carries on, so a broken
+# source dropped one object and linked the rest -- the .so appeared, packaging
+# accepted it, and the change under test was simply absent from the runtime.
+# That is the worst shape a build failure can take: everything looks like it
+# worked and the next round of testing is spent on the previous binary.  It cost
+# one, on a single-token mistake (SYS_CopyVars for NP_CopyVars) sitting in a
+# screenful of unused-parameter warnings.
+#
+# Reported at the END, after everything has been attempted, so one run shows
+# every error rather than stopping at the first.
+if [ "${TOTAL_COMPILE_FAIL:-0}" -gt 0 ]; then
+    echo ""
+    echo "########################################################################"
+    echo "  BUILD FAILED: $TOTAL_COMPILE_FAIL source file(s) did not compile."
+    echo "  The .so files above are INCOMPLETE -- do not package or install them."
+    echo "  Search this output for 'FAIL' to find which."
+    echo "########################################################################"
+    exit 1
+fi
