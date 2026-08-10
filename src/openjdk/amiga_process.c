@@ -261,7 +261,6 @@ static int spawnDetached(const char *program, const char *const *argv,
 {
     struct DOSIFace *dos = dosInterface();
     char *command;
-    BPTR cwdLock = ZERO;
     LONG rc;
     int pid;
 
@@ -278,20 +277,22 @@ static int spawnDetached(const char *program, const char *const *argv,
         return -1;
     }
 
-    if (cwd != NULL)
-    {
-        cwdLock = dos->Lock(cwd, SHARED_LOCK);
-    }
+    BPTR in = dos->DupFileHandle(dos->Input());
+    BPTR out = dos->DupFileHandle(dos->Output());
+    BPTR err = dos->DupFileHandle(dos->ErrorOutput());
+
     IExec->DebugPrintF("[AMIGA_PROCESS] spawnDetached: %s\n", command);
     rc = dos->SystemTags(command,
                          SYS_Input,     0,
                          SYS_Output,    0,
                          SYS_Error,     0,
+                         SYS_Input,     in,
+                         SYS_Output,    out,
+                         SYS_Error,     err,
+                         NP_CloseError, TRUE,                         
                          SYS_Asynch,    TRUE,
                          NP_CopyVars,   TRUE,
-                         NP_Child,      TRUE,
                          NP_StackSize,  8191875,
-                         cwdLock ? NP_CurrentDir : TAG_IGNORE, cwdLock,
                          TAG_DONE);
     pid = (int)dos->IoErr(); /* before any other DOS call */
     IExec->DebugPrintF("[AMIGA_PROCESS] spawnDetached: rc=%ld, pid=%d\n", rc, pid);
@@ -299,16 +300,16 @@ static int spawnDetached(const char *program, const char *const *argv,
 
     if (rc != 0)
     {
-        if (cwdLock)
-            dos->UnLock(cwdLock);
+        if (in)
+            dos->Close(in);
+        if (out)
+            dos->Close(out);
+        if (err)
+            dos->Close(err);
         errno = EINVAL;
         return -1;
     }
 
-    if (cwdLock)
-    {
-        dos->UnLock(cwdLock);
-    }
     return pid > 0 ? pid : 1; /* a pid Java can hold; never 0 */
 }
 
