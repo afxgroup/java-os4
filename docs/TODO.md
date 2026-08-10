@@ -25,6 +25,43 @@ Two things worth not rediscovering:
 `tools/test-java-launcher.c` compiles the launcher for the host with `spawnv`
 replaced by a recorder and asserts on what it was handed; the build runs it.
 
+## An updater must wait for the application to exit, not just be started
+
+Distinct from the entry below, and settled by measurement rather than argument.
+
+An auto-updater replacing plugin jars fails, and loops:
+
+```
+elimino precedente:false
+java.io.FileNotFoundException: .../InvoicexPluginInvoicex.jar (Device busy)
+```
+
+`examples/FileBusy` on that exact path, with nothing else running, reports
+
+```
+open for write : ok (not held)
+delete()       : true   (gone)
+```
+
+so the file is free when the application is not running.  No leaked handle
+surviving the process, no protection bit, nothing wrong with delete: at the
+moment the updater tried, a LIVE process had it open -- the application itself,
+which carries `plugins/InvoicexPluginInvoicex.jar` on its class path and whose
+loader holds it for the life of the VM.
+
+The updater is simply too early.  It is started, the application then takes
+several seconds to shut down, and the replace happens in between.  On Linux that
+race is invisible because an open file can be deleted; here DOS answers
+ERROR_OBJECT_IN_USE and the update fails, so it runs again next start, and
+loops.
+
+Nothing to fix in the port -- this is AmigaOS behaving correctly.  The updater
+has to wait for the application to be gone before replacing anything, the way
+`examples/SpawnSurvive`'s child does, or retry with a backoff until the jar
+becomes writable.  `FileBusy` distinguishes the two cases if it happens again:
+if a collection frees the file, it was an unclosed ZipFile in the updater's own
+JVM instead.
+
 ## A self-updating application cannot rewrite its own jar
 
 Reported as a path bug, and it is not one:
