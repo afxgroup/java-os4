@@ -2045,10 +2045,10 @@ index 6edb60b..6886837 100644
  }
  
 diff --git a/src/lock.c b/src/lock.c
-index 5fdec27..586e754 100644
+index 5fdec27..93bd591 100644
 --- a/src/lock.c
 +++ b/src/lock.c
-@@ -146,7 +146,57 @@ void monitorLock(Monitor *mon, Thread *self) {
+@@ -146,7 +146,66 @@ void monitorLock(Monitor *mon, Thread *self) {
              self->blocked_count++;
              classlibSetThreadState(self, BLOCKED);
  
@@ -2083,7 +2083,16 @@ index 5fdec27..586e754 100644
 +                while(pthread_mutex_trylock(&mon->lock) != 0) {
 +                    struct timespec deadline;
 +
-+                    if(vm_exiting && !isMainVMThread()) {
++                    /* Plain blocking lock while the VM runs: polling every
++                       contended monitor at 20Hz costs the whole runtime, and
++                       this is not where an undrainable thread ends up anyway
++                       -- it parks in monitorWait, one frame further in. */
++                    if(!vm_exiting) {
++                        pthread_mutex_lock(&mon->lock);
++                        break;
++                    }
++
++                    if(!isMainVMThread()) {
 +                        classlibSetThreadState(self, RUNNING);
 +                        self->blocked_mon = NULL;
 +                        enableSuspend(self);
@@ -2106,7 +2115,7 @@ index 5fdec27..586e754 100644
  
              classlibSetThreadState(self, RUNNING);
              self->blocked_mon = NULL;
-@@ -238,8 +288,52 @@ int monitorWait(Monitor *mon, Thread *self, long long ms, int ns,
+@@ -238,8 +297,71 @@ int monitorWait(Monitor *mon, Thread *self, long long ms, int ns,
                     empty for sane platforms. */ 
  
                  FPU_HACK;
@@ -2150,8 +2159,27 @@ index 5fdec27..586e754 100644
 +                        return TRUE;                 /* not reached */
 +                    }
 +
-+                    getTimeoutRelative(&slice, 50, 0);      /* 50ms */
-+                    pthread_cond_timedwait(&self->wait_cv, &mon->lock, &slice);
++                    /*
++                     * Untimed while the VM is RUNNING.  Slicing here
++                     * unconditionally was a bad trade paid by everything else:
++                     * every Object.wait() in the runtime became a 20Hz wakeup,
++                     * each one re-acquiring the monitor mutex, and an
++                     * application with dozens of waiting threads spent its
++                     * whole CPU on the herd.  InvoiceX hung at startup on it.
++                     *
++                     * Nothing is lost by waiting properly: threadInterrupt
++                     * signals this very condvar (wait_mon is set just above),
++                     * so shutdown wakes the thread, and the check above then
++                     * gets it out on the next pass.  The slice is only for the
++                     * case where it is already exiting.
++                     */
++                    if(vm_exiting) {
++                        getTimeoutRelative(&slice, 50, 0);   /* 50ms */
++                        pthread_cond_timedwait(&self->wait_cv, &mon->lock,
++                                               &slice);
++                    } else {
++                        pthread_cond_wait(&self->wait_cv, &mon->lock);
++                    }
 +                }
 +#else
                  pthread_cond_wait(&self->wait_cv, &mon->lock);
