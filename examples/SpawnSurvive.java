@@ -23,6 +23,12 @@
  * would show nothing either way, and a test whose result you cannot see is
  * worse than no test.
  *
+ *     java -cp examples/SpawnSurvive.jar SpawnSurvive dirty
+ *
+ * runs the same thing with the parent leaving a stuck non-daemon thread, so its
+ * shutdown is forced out on a timeout the way a real application's is rather
+ * than draining cleanly the way a test's does.
+ *
  *     PASS   the file ends with SURVIVED
  *     FAIL   the file stops partway  -> the child died when the parent did
  *     FAIL   the file is never made  -> the child never started
@@ -49,12 +55,31 @@ public class SpawnSurvive {
             child(args[1]);
             return;
         }
-        parent();
+        parent(args.length > 0 && "dirty".equals(args[0]));
     }
 
     /* ---- parent ---------------------------------------------------------- */
 
-    private static void parent() throws Exception {
+    /*
+     * dirty: leave a non-daemon thread stuck, so the parent exits the way a real
+     * application does rather than the way a test does.
+     *
+     * The difference is visible in the serial log and it is not small.  This
+     * test's parent drains and goes:
+     *
+     *     [EXIT] wait loop done tries=1   threads=1 target=1
+     *
+     * InvoiceX's could not, and left on a timeout with two threads still alive:
+     *
+     *     [EXIT] wait loop done tries=301 threads=2 target=1
+     *     [EXIT] amiga_exit: calling exit() (threads left=2)
+     *
+     * A parent that exits cleanly and one that is forced out after three
+     * seconds of failing to drain are different shutdowns, and the child sees
+     * different things on the way down.  If the real case ever fails again
+     * while the plain test passes, run this mode before suspecting the spawn.
+     */
+    private static void parent(boolean dirty) throws Exception {
         File out = new File("spawnsurvive.txt");
         if (out.exists() && !out.delete()) {
             System.out.println("cannot remove the previous " + out
@@ -73,11 +98,33 @@ public class SpawnSurvive {
         cmd.add("child");
         cmd.add(out.getAbsolutePath());
 
-        System.out.println("SpawnSurvive");
+        System.out.println("SpawnSurvive"
+                           + (dirty ? "  [dirty shutdown]" : ""));
         System.out.println("  launcher : " + java);
         System.out.println("  result   : " + out.getAbsolutePath());
         System.out.println();
         System.out.println("starting the child, then exiting immediately.");
+
+        if (dirty) {
+            /* Non-daemon and parked forever: the VM cannot drain it, so the
+               shutdown takes the timeout path.  Not a daemon thread -- a daemon
+               would be abandoned quietly and prove nothing. */
+            Thread stuck = new Thread(new Runnable() {
+                public void run() {
+                    synchronized (SpawnSurvive.class) {
+                        try {
+                            SpawnSurvive.class.wait();
+                        } catch (InterruptedException ignored) {
+                            /* nothing: the point is not to leave */
+                        }
+                    }
+                }
+            }, "stuck-nondaemon");
+            stuck.setDaemon(false);
+            stuck.start();
+            System.out.println("  mode     : dirty (a stuck non-daemon thread,"
+                               + " so shutdown takes the timeout path)");
+        }
 
         new ProcessBuilder(cmd).start();
 
@@ -96,6 +143,11 @@ public class SpawnSurvive {
         System.out.println("  last line " + MARKER + "  -> the child survived");
         System.out.println("  file stops earlier       -> it died with the parent");
         System.out.println("  no file at all           -> it never started");
+
+        /* Explicit, because in dirty mode the stuck thread would otherwise keep
+           the VM alive: the point is for this process to GO, by whichever path
+           the mode asked for. */
+        System.exit(0);
     }
 
     /*
