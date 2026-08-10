@@ -13,6 +13,24 @@ index a220c231..c9b3d3f9 100755
  
  extern int profil(unsigned short *buffer, size_t bufSize, size_t offset, unsigned int scale);
  extern long sysconf(int name);
+diff --git a/library/misc/children.c b/library/misc/children.c
+index f80db175..ae2095fb 100644
+--- a/library/misc/children.c
++++ b/library/misc/children.c
+@@ -256,7 +256,12 @@ spawnedProcessEnter(int32 entry_data) {
+ 	 * spawnvpe_fork passes a stack structure and waits for SIGF_CHILD. */
+ 	if (data->freeData)
+ 		FreeVec(data);
+-	Signal(parentTask, SIGF_CHILD);
++	/* A DETACHED child has no parent to tell: spawnvpe_detached() stores a NULL
++	   parentTask precisely so it holds no pointer to a Task that may be gone
++	   before it looks at one.  Signal(NULL, ...) would dereference it here, in
++	   the child, which is the crash this was meant to prevent rather than move. */
++	if (parentTask != NULL)
++		Signal(parentTask, SIGF_CHILD);
+ }
+ 
+ void
 diff --git a/library/shared_library/clib4_vectors.h b/library/shared_library/clib4_vectors.h
 index 8f67dbfe..c60c2bdd 100644
 --- a/library/shared_library/clib4_vectors.h
@@ -51,7 +69,7 @@ index 00000000..b91b18b7
 +#include "stubs_common.h"
 +Clib4Call(spawnvpe_detached, 4516);
 diff --git a/library/unistd/spawnvpe.c b/library/unistd/spawnvpe.c
-index 2351770c..1e55c603 100644
+index 2351770c..689fa5ce 100644
 --- a/library/unistd/spawnvpe.c
 +++ b/library/unistd/spawnvpe.c
 @@ -17,15 +17,33 @@
@@ -102,14 +120,19 @@ index 2351770c..1e55c603 100644
      data->parentUuid[0] = '\0';
      data->fdInherit = fd_inherit;
      data->freeData = TRUE;
-@@ -243,14 +263,16 @@ spawnvpe(
+@@ -243,14 +263,21 @@ spawnvpe(
          strncpy(data->parentUuid, __CLIB4->uuid, UUID4_LEN);
  
      ret = SystemTags(full_command,
 -                    NP_NotifyOnDeathSigTask, me,
-+                    /* Both of these bind the child's lifetime to ours; skipped
-+                       when detached, so it outlives us cleanly. */
-+                    detached ? TAG_SKIP : NP_NotifyOnDeathSigTask, me,
++                    /* Binds the child's lifetime to ours; dropped when
++                       detached so it outlives us cleanly.
++                       TAG_IGNORE, not TAG_SKIP: TAG_SKIP means "skip this and
++                       the next ti_Data items", and ti_Data here is `me` -- a
++                       Task pointer, i.e. a count of about a billion, which
++                       walks SystemTags straight off the end of the tag array.
++                       TAG_IGNORE ignores exactly this one item and its data. */
++                    detached ? TAG_IGNORE : NP_NotifyOnDeathSigTask, me,
                      SYS_Input,          iofh[0],
                      SYS_Output,         iofh[1],
                      SYS_Error,          iofh[2],
@@ -121,7 +144,7 @@ index 2351770c..1e55c603 100644
                      NP_StackSize,       2024 * 1024,
                      cwdLock ? NP_CurrentDir : TAG_SKIP, cwdLock,
                      NP_Name,            process_name,
-@@ -328,3 +350,37 @@ spawnvpe(
+@@ -328,3 +355,37 @@ spawnvpe(
  
      return ret;
  }
