@@ -13,6 +13,43 @@ index a220c231..c9b3d3f9 100755
  
  extern int profil(unsigned short *buffer, size_t bufSize, size_t offset, unsigned int scale);
  extern long sysconf(int name);
+diff --git a/library/shared_library/clib4_vectors.h b/library/shared_library/clib4_vectors.h
+index 8f67dbfe..c60c2bdd 100644
+--- a/library/shared_library/clib4_vectors.h
++++ b/library/shared_library/clib4_vectors.h
+@@ -1212,5 +1212,8 @@ static void *clib4Vectors[] = {
+         (void *) (setcontext),                            /* 4504 */
+         (void *) (swapcontext),                           /* 4508 */
+         (void *) (makecontext),                           /* 4512 */
++
++        /* unistd.h */
++        (void *) (spawnvpe_detached),                     /* 4516 */
+         (void *)-1
+ };
+\ No newline at end of file
+diff --git a/library/shared_library/interface.h b/library/shared_library/interface.h
+index fa886189..74a417dc 100644
+--- a/library/shared_library/interface.h
++++ b/library/shared_library/interface.h
+@@ -1386,6 +1386,10 @@ struct Clib4IFace {
+     int  (* setcontext) (const ucontext_t *__ucp);                                                                                                   /* 4504 */
+     int  (* swapcontext) (ucontext_t *__oucp, const ucontext_t *__ucp);                                                                              /* 4508 */
+     void (* makecontext) (ucontext_t *__ucp, void (*func)(void), int argc, ...);                                                                     /* 4512 */
++
++    /* Appended, never inserted: every offset below is an ABI position, so a new
++       method goes at the END or it shifts everything after it. */
++    int  (* spawnvpe_detached) (const char *file, const char **argv, char **deltaenv, const char *dir, int fhin, int fhout, int fherr);              /* 4516 */
+ };
+ 
+ #ifdef __PIC__
+diff --git a/library/shared_library/stubs_spawnvpe_detached.c b/library/shared_library/stubs_spawnvpe_detached.c
+new file mode 100644
+index 00000000..b91b18b7
+--- /dev/null
++++ b/library/shared_library/stubs_spawnvpe_detached.c
+@@ -0,0 +1,2 @@
++#include "stubs_common.h"
++Clib4Call(spawnvpe_detached, 4516);
 diff --git a/library/unistd/spawnvpe.c b/library/unistd/spawnvpe.c
 index 2351770c..1e55c603 100644
 --- a/library/unistd/spawnvpe.c
