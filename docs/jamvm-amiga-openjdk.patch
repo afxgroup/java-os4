@@ -2045,7 +2045,7 @@ index 6edb60b..6886837 100644
  }
  
 diff --git a/src/lock.c b/src/lock.c
-index 5fdec27..c9d5596 100644
+index 5fdec27..586e754 100644
 --- a/src/lock.c
 +++ b/src/lock.c
 @@ -146,7 +146,57 @@ void monitorLock(Monitor *mon, Thread *self) {
@@ -2088,7 +2088,7 @@ index 5fdec27..c9d5596 100644
 +                        self->blocked_mon = NULL;
 +                        enableSuspend(self);
 +                        exitDetachAndDieSelf();
-+                        return;                 /* not reached */
++                        return TRUE;            /* not reached */
 +                    }
 +
 +                    clock_gettime(CLOCK_REALTIME, &deadline);
@@ -2106,6 +2106,60 @@ index 5fdec27..c9d5596 100644
  
              classlibSetThreadState(self, RUNNING);
              self->blocked_mon = NULL;
+@@ -238,8 +288,52 @@ int monitorWait(Monitor *mon, Thread *self, long long ms, int ns,
+                    empty for sane platforms. */ 
+ 
+                 FPU_HACK;
+-            } else
++            } else {
++#ifdef __amigaos4__
++                /*
++                 * Wait in slices, so an untimed wait can still be left when the
++                 * VM is shutting down.
++                 *
++                 * This is where a thread contending for a monitor actually
++                 * parks: objectLock's slow path calls monitorWait(.., 0, 0, ..)
++                 * and lands in an unbounded pthread_cond_wait on the thread's
++                 * OWN wait_cv.  Only the monitor's owner ever signals that, so
++                 * if the owner never releases -- an application deadlock, or
++                 * simply a thread that outlives the work -- nothing can wake it.
++                 * exitWakeAllThreads does not reach it either: that notifies
++                 * the VM's own wait locks, not a per-thread condvar.
++                 *
++                 * Such a thread is undrainable, and amiga_exit gives up after
++                 * 300 tries and returns to main anyway.  The process then tears
++                 * its clib4 context down with those threads still running, and
++                 * on AmigaOS -- one address space for everything -- they write
++                 * into memory since handed to someone else.  Reproduced by
++                 * SpawnSurvive dirty, which kills the CHILD process, in the
++                 * child's own heap, mid Thread.sleep.
++                 *
++                 * The first attempt at this put the poll in monitorLock, which
++                 * was the wrong line: the thread passes THROUGH monitorLock and
++                 * stops here.  The thread dump said BLOCKED either way, which is
++                 * what made them look alike.
++                 */
++                {
++                    extern volatile int vm_exiting;
++                    extern void exitDetachAndDieSelf(void);
++                    struct timespec slice;
++
++                    if(vm_exiting && !isMainVMThread()) {
++                        pthread_mutex_unlock(&mon->lock);
++                        exitDetachAndDieSelf();
++                        return TRUE;                 /* not reached */
++                    }
++
++                    getTimeoutRelative(&slice, 50, 0);      /* 50ms */
++                    pthread_cond_timedwait(&self->wait_cv, &mon->lock, &slice);
++                }
++#else
+                 pthread_cond_wait(&self->wait_cv, &mon->lock);
++#endif
++            }
+ 
+         /* If we've been interrupted or timed-out, we will not have been
+            removed from the wait set.  If we have, we must have been
 diff --git a/src/os/amiga/os.c b/src/os/amiga/os.c
 index 5561c20..04303a0 100644
 --- a/src/os/amiga/os.c
