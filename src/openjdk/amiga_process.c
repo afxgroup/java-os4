@@ -283,7 +283,26 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
      * descriptor to hand straight to the child (ProcessBuilder redirecting to
      * a file).  Each pipe gives the child one end and keeps the other.
      */
-    if (fds[0] == -1) {
+    if (detachedSpawn()) {
+        /*
+         * DETACHED: no pipes, and nothing else of ours either.
+         *
+         * A pipe is a reference to this process.  Handing the child one end of
+         * it means that when we exit -- which is the whole point of a detached
+         * spawn -- the handle dies under it, and the child faults the next time
+         * it writes a line.  That is the crash that survived removing NP_Child,
+         * the death signal and parentTask: those were the references we knew
+         * about, and the pipes were the ones still there.
+         *
+         * -1 for all three tells spawnvpe to open NIL:, so the child's stdio
+         * belongs to the child.  Java's Process therefore reports EOF on
+         * getInputStream() immediately: with nobody left to read a pipe, that
+         * is the truthful answer rather than a hang.  Set
+         * AMIGA_PROCESS_DETACHED=0 for a child whose output you need to read
+         * and whose parent will outlive it.
+         */
+        childIn = childOut = childErr = -1;
+    } else if (fds[0] == -1) {
         if (pipe(in) < 0) {
             goto CatchIO;
         }
@@ -293,17 +312,19 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
         childIn = fds[0];
     }
 
-    if (fds[1] == -1) {
+    if (!detachedSpawn() && fds[1] == -1) {
         if (pipe(out) < 0) {
             goto CatchIO;
         }
         childOut = out[1];                      /* child writes its stdout */
         dontInherit(out[0]);                    /* ours; not the child's */
-    } else {
+    } else if (!detachedSpawn()) {
         childOut = fds[1];
     }
 
-    if (redirectErrorStream) {
+    if (detachedSpawn()) {
+        /* already -1: NIL: on all three */
+    } else if (redirectErrorStream) {
         childErr = childOut;
     } else if (fds[2] == -1) {
         if (pipe(err) < 0) {

@@ -92,9 +92,8 @@
 #define JAVAOS4_DATE "01.01.2026"
 #endif
 
-const char __attribute__((used)) java_launcher_verstag[] =
-    "$VER: java " JAVAOS4_VER " (" JAVAOS4_DATE ") OpenJDK " JAVAOS4_JAVAVER;
-
+static const char __attribute__((used)) java_launcher_verstag[] = "$VER: java " JAVAOS4_VER " (" JAVAOS4_DATE ") OpenJDK " JAVAOS4_JAVAVER;
+static const char *__attribute__((used)) stack = "$STACK: 8191875\0";
 /*
  * Where the runtime is, if we cannot work it out.
  *

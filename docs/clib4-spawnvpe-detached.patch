@@ -69,7 +69,7 @@ index 00000000..b91b18b7
 +#include "stubs_common.h"
 +Clib4Call(spawnvpe_detached, 4516);
 diff --git a/library/unistd/spawnvpe.c b/library/unistd/spawnvpe.c
-index 2351770c..689fa5ce 100644
+index 2351770c..8f2271fd 100644
 --- a/library/unistd/spawnvpe.c
 +++ b/library/unistd/spawnvpe.c
 @@ -17,15 +17,33 @@
@@ -109,7 +109,26 @@ index 2351770c..689fa5ce 100644
  ) {
      int ret = -1;
      struct name_translation_info nti_name;
-@@ -235,7 +253,9 @@ spawnvpe(
+@@ -217,7 +235,17 @@ spawnvpe(
+ 
+     D(("(*)Calling SystemTags.\n"));
+ 
+-    fd_inherit = build_fd_inherit_spec(__clib4, fhin, fhout, fherr);
++    /*
++     * A detached child inherits NOTHING of ours.
++     *
++     * build_fd_inherit_spec hands over every descriptor without FD_CLOEXEC,
++     * which is right for an ordinary child and wrong for one that must outlive
++     * us: each of those is a handle owned by a process that is about to go, and
++     * the child faults on the first use afterwards.  Its stdio comes from the
++     * NIL: handles opened above instead.
++     */
++    fd_inherit = detached ? NULL
++                          : build_fd_inherit_spec(__clib4, fhin, fhout, fherr);
+ 
+     data = AllocVecTags(sizeof(*data), AVT_Type, MEMF_SHARED, TAG_DONE);
+     if (data == NULL) {
+@@ -235,22 +263,34 @@ spawnvpe(
      }
  
      data->groupId = getgid();
@@ -120,7 +139,11 @@ index 2351770c..689fa5ce 100644
      data->parentUuid[0] = '\0';
      data->fdInherit = fd_inherit;
      data->freeData = TRUE;
-@@ -243,14 +263,21 @@ spawnvpe(
+-    if (__CLIB4->uuid)
++    /* Left empty when detached: the uuid is what insertSpawnedChildren files the
++       child under in the PARENT's children table, and a detached child does not
++       belong in a table owned by a process that will not be there. */
++    if (!detached && __CLIB4->uuid)
          strncpy(data->parentUuid, __CLIB4->uuid, UUID4_LEN);
  
      ret = SystemTags(full_command,
@@ -144,7 +167,7 @@ index 2351770c..689fa5ce 100644
                      NP_StackSize,       2024 * 1024,
                      cwdLock ? NP_CurrentDir : TAG_SKIP, cwdLock,
                      NP_Name,            process_name,
-@@ -328,3 +355,37 @@ spawnvpe(
+@@ -328,3 +368,37 @@ spawnvpe(
  
      return ret;
  }
