@@ -2044,6 +2044,68 @@ index 6edb60b..6886837 100644
      return addJNILref(class);
  }
  
+diff --git a/src/lock.c b/src/lock.c
+index 5fdec27..c9d5596 100644
+--- a/src/lock.c
++++ b/src/lock.c
+@@ -146,7 +146,57 @@ void monitorLock(Monitor *mon, Thread *self) {
+             self->blocked_count++;
+             classlibSetThreadState(self, BLOCKED);
+ 
++#ifdef __amigaos4__
++            /*
++             * Wait in slices, so a thread blocked here can still leave when the
++             * VM is shutting down.
++             *
++             * pthread_mutex_lock() is an unbounded block inside clib4: the
++             * thread is not executing bytecode, so it never reaches a dispatch
++             * safepoint, and exitWakeAllThreads() cannot reach it either --
++             * that notifies condition variables, and this is monitor entry.  A
++             * thread stuck here is therefore one the VM cannot drain.
++             *
++             * What that costs is not a slow exit.  amiga_exit() gives up after
++             * 300 tries and returns to main ANYWAY, so the process tears its
++             * clib4 context down while those threads are still running -- and
++             * on AmigaOS, where every process shares one address space, they
++             * then write into whatever has since been given to somebody else.
++             * That is reproducible: SpawnSurvive with a thread blocked here
++             * kills the CHILD process, in its own heap, mid Thread.sleep.
++             *
++             * So: try, look at whether the VM is going down, try again.  A
++             * thread that finds the VM exiting leaves through the same door as
++             * every other -- unlinked and counted out -- instead of being
++             * abandoned still running.
++             */
++            {
++                extern volatile int vm_exiting;
++                extern void exitDetachAndDieSelf(void);
++
++                while(pthread_mutex_trylock(&mon->lock) != 0) {
++                    struct timespec deadline;
++
++                    if(vm_exiting && !isMainVMThread()) {
++                        classlibSetThreadState(self, RUNNING);
++                        self->blocked_mon = NULL;
++                        enableSuspend(self);
++                        exitDetachAndDieSelf();
++                        return;                 /* not reached */
++                    }
++
++                    clock_gettime(CLOCK_REALTIME, &deadline);
++                    deadline.tv_nsec += 50000000;      /* 50ms */
++                    if(deadline.tv_nsec >= 1000000000) {
++                        deadline.tv_nsec -= 1000000000;
++                        deadline.tv_sec++;
++                    }
++                    pthread_mutex_timedlock(&mon->lock, &deadline);
++                }
++            }
++#else
+             pthread_mutex_lock(&mon->lock);
++#endif
+ 
+             classlibSetThreadState(self, RUNNING);
+             self->blocked_mon = NULL;
 diff --git a/src/os/amiga/os.c b/src/os/amiga/os.c
 index 5561c20..04303a0 100644
 --- a/src/os/amiga/os.c
