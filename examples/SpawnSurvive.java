@@ -106,24 +106,67 @@ public class SpawnSurvive {
         System.out.println("starting the child, then exiting immediately.");
 
         if (dirty) {
-            /* Non-daemon and parked forever: the VM cannot drain it, so the
-               shutdown takes the timeout path.  Not a daemon thread -- a daemon
-               would be abandoned quietly and prove nothing. */
-            Thread stuck = new Thread(new Runnable() {
+            /*
+             * BLOCKED on a monitor, not parked in Object.wait().
+             *
+             * The first version of this waited, and the serial log showed it
+             * drained at the first attempt:
+             *
+             *     [EXIT] wait loop try=1 threads=5 -> done tries=1 threads=1
+             *
+             * which is not what it set out to imitate.  exitWakeAllThreads()
+             * notifies condition variables, so a waiting thread leaves the
+             * moment it is asked to.  InvoiceX's would not:
+             *
+             *     [EXIT] wait loop done tries=301 threads=2 target=1
+             *
+             * because BLOCKED means stopped at monitorenter, waiting for a lock
+             * somebody else holds.  A notify does not reach that, and a thread
+             * that is not executing bytecode never reaches a safepoint poll
+             * either -- so the VM has nothing to ask and leaves on the timeout.
+             *
+             * Reproduced with two threads: a daemon takes the lock and keeps
+             * it, and a non-daemon then blocks trying to enter.
+             */
+            final Object lock = new Object();
+
+            Thread holder = new Thread(new Runnable() {
                 public void run() {
-                    synchronized (SpawnSurvive.class) {
-                        try {
-                            SpawnSurvive.class.wait();
-                        } catch (InterruptedException ignored) {
-                            /* nothing: the point is not to leave */
+                    synchronized (lock) {
+                        while (true) {
+                            try {
+                                Thread.sleep(60000);
+                            } catch (InterruptedException ignored) {
+                                /* keeps the lock either way */
+                            }
                         }
                     }
                 }
+            }, "lock-holder");
+            holder.setDaemon(true);      /* daemon: not what we are testing */
+            holder.start();
+
+            /* Let the holder actually get the lock before the other one tries,
+               or the two could come out the wrong way round. */
+            Thread.sleep(300);
+
+            Thread stuck = new Thread(new Runnable() {
+                public void run() {
+                    synchronized (lock) {
+                        System.out.println("stuck thread got the lock -- the "
+                                           + "test did not reproduce a block");
+                    }
+                }
             }, "stuck-nondaemon");
-            stuck.setDaemon(false);
+            stuck.setDaemon(false);      /* non-daemon: a daemon proves nothing */
             stuck.start();
-            System.out.println("  mode     : dirty (a stuck non-daemon thread,"
-                               + " so shutdown takes the timeout path)");
+            Thread.sleep(300);
+
+            System.out.println("  mode     : dirty (\"" + stuck.getName()
+                               + "\" is " + stuck.getState()
+                               + " on a held monitor)");
+            System.out.println("             expect the serial log to show the"
+                               + " wait loop time OUT, not drain");
         }
 
         new ProcessBuilder(cmd).start();
