@@ -17,13 +17,20 @@ Two things worth not rediscovering:
   `LD_LIBRARY_PATH` is *not* set. Linked against the clib4 sobjs it would need
   `Sobjs/libc.so` in order to run the code that says where `Sobjs` is. The build
   fails on any `DT_NEEDED` rather than shipping that circle.
-- **`spawnv`, not `system`.** `system()` takes a string, which would mean
-  concatenating argv and quoting it for the DOS shell by hand -- rebuilding the
-  layer whose mis-parsing the program exists to fix. `spawnv` takes an array and
-  clib4 quotes it once, correctly, in `build_arg_string()`.
+- **`system`, not `spawnv`.** This said the opposite for a while, on the
+  reasoning that `spawnv` takes an array and lets clib4 do the quoting where
+  `system()` takes a string and makes the quoting ours to get wrong. True, and
+  aimed at the smaller risk: clib4's `spawnv` and `spawnvpe` both pass
+  `NP_Child, TRUE` and `NP_NotifyOnDeathSigTask, me`, so the child is a DOS
+  child of ours and signals our Task when it dies -- fine while we are alive,
+  dangling afterwards, and an auto-updater exists precisely to outlive us.
+  `system()` passes only `SYS_UserShell`. The quoting is ours now, to AmigaDOS's
+  rules ('*' escapes, not backslash), in `src/common/amiga_cmdline.h`, shared
+  with `Runtime.exec` which hands DOS a string for the same reason.
 
-`tools/test-java-launcher.c` compiles the launcher for the host with `spawnv`
-replaced by a recorder and asserts on what it was handed; the build runs it.
+`tools/test-java-launcher.c` compiles the launcher for the host with `system()`
+replaced by a recorder and asserts on the command line it built -- including the
+quoting, which is the part that would corrupt a command silently.
 
 ## An updater must wait for the application to exit, not just be started
 
