@@ -45,6 +45,41 @@
 
 /* The port's single source of truth for Java path -> AmigaDOS path. */
 #include "amiga_path.h"
+#include "../common/amiga_cmdline.h"
+
+#ifdef __amigaos4__
+#include <exec/types.h>
+#include <dos/dos.h>
+#include <dos/dostags.h>
+#include <exec/exec.h>
+#include <interfaces/dos.h>
+#include <interfaces/exec.h>
+
+/*
+ * Our own dos.library interface, opened on first use.
+ *
+ * NOT the global IDOS: a shared object here gets only what the loader can
+ * resolve, and while libc.so exports IExec, nothing exports IDOS -- the
+ * packaging symbol sweep says so plainly ("libjava.so references symbols
+ * nothing provides: Close IoErr Lock Open SystemTags UnLock" when these were
+ * called directly).  libamigaawt.c opens intuition.library the same way and for
+ * the same reason.
+ */
+extern struct ExecIFace *IExec;
+static struct DOSIFace *dosIFace;
+
+static struct DOSIFace *dosInterface(void) {
+    if(dosIFace == NULL) {
+        struct Library *base = IExec->OpenLibrary("dos.library", 50);
+
+        if(base != NULL) {
+            dosIFace = (struct DOSIFace *)
+                IExec->GetInterface(base, "main", 1, NULL);
+        }
+    }
+    return dosIFace;
+}
+#endif
 
 /*
  * Returned by waitForProcessExit0 when the child is still running.  No AmigaDOS
@@ -158,55 +193,106 @@ Java_java_lang_AmigaDiag_openFdCount(JNIEnv *env, jclass clazz) {
 }
 
 /*
- * Detached spawning: the child does not depend on this process.
+ * Detached spawning: the child keeps NOTHING of ours.
  *
- * clib4's spawnvpe ties the child to us three ways -- NP_Child makes it a DOS
- * child, NP_NotifyOnDeathSigTask has it Signal() our Task when it exits, and
- * spawnData.parentTask hands it a pointer to that Task.  Correct while we live;
- * all three dangle the moment we do not.
+ * clib4's spawnvpe ties the child to us in five ways -- NP_Child, a death
+ * signal to our Task, spawnData.parentTask, the inherited descriptor list, and
+ * the stdio pipes themselves.  Every one of them is a handle owned by a process
+ * that is about to exit, which is the whole point of an auto-updater: the
+ * application starts it precisely so it can replace the application.  Removing
+ * them one at a time chased the crash around; the answer is not to hand over
+ * anything at all.
  *
- * An auto-updater is precisely the case that breaks, and it is not exotic: the
- * application runs `java` on an updater and then exits, so the thing it started
- * is meant to outlive it.  What actually happened was a DSI in the grandchild
- * after the shell had returned to the prompt, with DOS reporting "Parent #185
- * deletion resuming, all children have now gone".
+ * So this does what clib4's own system() does -- SystemTags with SYS_UserShell
+ * and nothing else -- plus SYS_Asynch, which is the one thing system() does not
+ * do and that this needs: system() blocks until the command finishes, and the
+ * updater is waiting for US to exit, so a synchronous call is a deadlock rather
+ * than a wait.  No NP_Child, no notify tag, no inherit spec, no pipes: DOS gets
+ * a command line and the child gets NIL: for its stdio.
  *
- * spawnvpe_detached() (clib4, ours) skips all three.  THE TRADE IS REAL: a
- * detached child is not in clib4's child table, so waitpid() has nothing to
- * wait on and Process.waitFor() cannot report an exit status.  That is the
- * choice -- a process that survives its parent, or an exit code from one that
- * must not.  For the overwhelmingly common "start it and exit" it is the right
- * way round, and setting AMIGA_PROCESS_DETACHED to 0 in the environment restores
- * the old behaviour for a caller that really needs the status:
- *
- *     SetEnv AMIGA_PROCESS_DETACHED 0
- *
- * An environment variable rather than a system property because this is read
- * from native code on a path where calling back into Java would cost more than
- * the setting is worth, and because it has to be answerable before any Java
- * property machinery is involved.
- *
- * REQUIRES the clib4 carrying spawnvpe_detached.  Declared here rather than
- * taken from <unistd.h> so this builds against an SDK header that predates it;
- * an older clib4 SOBJ will fail to resolve the symbol at load, loudly, which is
- * better than silently reverting to the tethered spawn.
+ * THE COST, and it is not hidden.  There is no pid to wait on and no pipes to
+ * read: Process.waitFor() returns immediately and getInputStream() is at EOF.
+ * That is the trade -- a process that survives its parent, or a status and
+ * output from one that must not.  SetEnv AMIGA_PROCESS_DETACHED 0 restores the
+ * tethered spawn, with pipes and a real exit status, for a caller whose parent
+ * outlives the child.
  */
-extern int spawnvpe_detached(const char *file, const char **argv,
-                             char **deltaenv, const char *dir,
-                             int fhin, int fhout, int fherr);
-
 static int detachedSpawn(void) {
     static int cached = -1;
 
     if(cached < 0) {
-        /* Read once: this is per-VM policy, not per-call, and reading a system
-           property from a native on every exec would be its own cost. */
+        /* Read once: this is per-VM policy, not per-call. */
         const char *v = getenv("AMIGA_PROCESS_DETACHED");
 
         cached = (v != NULL && (v[0] == '0' || v[0] == 'n' || v[0] == 'N'))
                  ? 0 : 1;
     }
     return cached;
+}
+
+/*
+ * Launch it and forget it.  Returns a pid on success, -1 with errno set.
+ *
+ * The pid comes from IoErr() immediately after SystemTags, which is where DOS
+ * leaves it for an asynchronous launch -- and "immediately" is literal: any
+ * other DOS call in between overwrites it.
+ */
+static int spawnDetached(const char *program, const char *const *argv,
+                         int argc, const char *cwd) {
+    struct DOSIFace *dos = dosInterface();
+    char *command;
+    BPTR cwdLock = ZERO;
+    BPTR nilIn, nilOut, nilErr;
+    LONG rc;
+    int pid;
+
+    if(dos == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    command = amiga_build_command(program, argv, argc);
+    if(command == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    if(cwd != NULL) {
+        cwdLock = dos->Lock(cwd, SHARED_LOCK);
+    }
+
+    /* Its own stdio, not ours.  SYS_Asynch makes DOS close these itself. */
+    nilIn  = dos->Open("NIL:", MODE_OLDFILE);
+    nilOut = dos->Open("NIL:", MODE_NEWFILE);
+    nilErr = dos->Open("NIL:", MODE_NEWFILE);
+
+    rc = dos->SystemTags(command,
+                    SYS_Input,      nilIn,
+                    SYS_Output,     nilOut,
+                    SYS_Error,      nilErr,
+                    SYS_UserShell,  TRUE,
+                    SYS_Asynch,     TRUE,
+                    cwdLock ? NP_CurrentDir : TAG_IGNORE, cwdLock,
+                    TAG_DONE);
+    pid = (int)dos->IoErr();       /* before any other DOS call */
+
+    free(command);
+
+    if(rc != 0) {
+        /* SYS_Asynch hands the handles to DOS only on success; on failure they
+           are still ours, and the lock always is. */
+        if(nilIn)  dos->Close(nilIn);
+        if(nilOut) dos->Close(nilOut);
+        if(nilErr) dos->Close(nilErr);
+        if(cwdLock) dos->UnLock(cwdLock);
+        errno = EINVAL;
+        return -1;
+    }
+
+    if(cwdLock) {
+        dos->UnLock(cwdLock);
+    }
+    return pid > 0 ? pid : 1;      /* a pid Java can hold; never 0 */
 }
 
 /* ---- natives -------------------------------------------------------- */
@@ -352,10 +438,11 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
      * both is exactly what it exists for.
      */
     if(detachedSpawn()) {
-        resultPid = (jint)spawnvpe_detached(amiga_path(pprog), argv,
-                               (char **)envv,
-                               pdir != NULL ? amiga_path(pdir) : NULL,
-                               childIn, childOut, childErr);
+        /* argv[0] is the program name by execv convention; the command line
+           takes the program separately, so skip it here or it appears twice. */
+        resultPid = (jint)spawnDetached(amiga_path(pprog),
+                               (const char *const *)(argv + 1), argc,
+                               pdir != NULL ? amiga_path(pdir) : NULL);
     } else {
         resultPid = (jint)spawnvpe(amiga_path(pprog), argv, (char **)envv,
                                pdir != NULL ? amiga_path(pdir) : NULL,

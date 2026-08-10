@@ -76,6 +76,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "../common/amiga_cmdline.h"
+
 #ifdef __amigaos4__
 #include <proto/dos.h>
 #endif
@@ -267,104 +269,6 @@ static void set_library_path(void) {
     }
 }
 
-/*
- * Does this argument have to be quoted for the AmigaDOS shell?
- *
- * The same set clib4's own build_arg_string() uses: whitespace splits an
- * argument, and a quote would otherwise start or end one.  0xA0 is a
- * non-breaking space, which the shell also treats as whitespace and which
- * arrives from any application that took its arguments from a GUI.
- */
-static int needs_quoting(const char *s) {
-    const unsigned char *p = (const unsigned char *)s;
-
-    if(*p == '\0') {
-        return 1;               /* an empty argument must survive as one */
-    }
-    for(; *p != '\0'; p++) {
-        if(*p == ' ' || *p == '\t' || *p == '\n' || *p == 0xA0 || *p == '"') {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/*
- * Append one argument, quoted if it needs to be.  Returns the number of
- * characters it would have written, so the caller can size the buffer by
- * running it once with a NULL destination -- the same measure-then-write shape
- * snprintf has, and for the same reason: guessing a bound for something that
- * can double in length is how buffers get overrun.
- *
- * AmigaDOS escapes with '*', not '\': a literal quote is *" and a literal
- * asterisk is **.  A newline inside an argument becomes *N, since a raw one
- * would end the command.
- */
-static size_t quote_arg(char *dst, const char *s) {
-    size_t n = 0;
-
-#define PUT(c) do { if(dst != NULL) dst[n] = (c); n++; } while(0)
-
-    if(!needs_quoting(s)) {
-        for(; *s != '\0'; s++) {
-            PUT(*s);
-        }
-        return n;
-    }
-
-    PUT('"');
-    for(; *s != '\0'; s++) {
-        switch(*s) {
-            case '"':
-            case '*':
-                PUT('*');
-                PUT(*s);
-                break;
-            case '\n':
-                PUT('*');
-                PUT('N');
-                break;
-            default:
-                PUT(*s);
-                break;
-        }
-    }
-    PUT('"');
-    return n;
-
-#undef PUT
-}
-
-/*
- * The whole command line: the VM, then our arguments, quoted and space
- * separated.  Measured first, then written, so the buffer is exactly right.
- * NULL if it cannot be allocated.
- */
-static char *build_command(const char *program, int argc, char *argv[]) {
-    size_t len = quote_arg(NULL, program);
-    char *cmd;
-    size_t n;
-    int i;
-
-    for(i = 1; i < argc; i++) {
-        len += 1 + quote_arg(NULL, argv[i]);       /* separating space */
-    }
-
-    cmd = malloc(len + 1);
-    if(cmd == NULL) {
-        return NULL;
-    }
-
-    n = quote_arg(cmd, program);
-    for(i = 1; i < argc; i++) {
-        cmd[n++] = ' ';
-        n += quote_arg(cmd + n, argv[i]);
-    }
-    cmd[n] = '\0';
-
-    return cmd;
-}
-
 int main(int argc, char *argv[]) {
     char *command;
     int status;
@@ -377,7 +281,9 @@ int main(int argc, char *argv[]) {
     resolve_paths();
     set_library_path();
 
-    command = build_command(vm_program, argc, argv);
+    command = amiga_build_command(vm_program,
+                                  (const char *const *)(argv + 1),
+                                  argc - 1);
     if(command == NULL) {
         fprintf(stderr, "java: out of memory building the command line\n");
         return 1;
