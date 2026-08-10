@@ -47,13 +47,17 @@
 #include "amiga_path.h"
 #include "../common/amiga_cmdline.h"
 
-#ifdef __amigaos4__
 #include <exec/types.h>
 #include <dos/dos.h>
 #include <dos/dostags.h>
 #include <exec/exec.h>
 #include <interfaces/dos.h>
 #include <interfaces/exec.h>
+
+
+#define console_prefix "CON:20/20/600/150/"
+#define console_suffix " Output/AUTO/CLOSE/WAIT"
+
 
 /*
  * Our own dos.library interface, opened on first use.
@@ -82,7 +86,6 @@ static struct DOSIFace *dosInterface(void)
     }
     return dosIFace;
 }
-#endif
 
 /*
  * Returned by waitForProcessExit0 when the child is still running.  No AmigaDOS
@@ -263,6 +266,7 @@ static int spawnDetached(const char *program, const char *const *argv,
     char *command;
     LONG rc;
     int pid;
+    STRPTR window_specifier = NULL;
 
     if (dos == NULL)
     {
@@ -277,15 +281,37 @@ static int spawnDetached(const char *program, const char *const *argv,
         return -1;
     }
 
-    BPTR in = dos->DupFileHandle(dos->Input());
-    BPTR out = dos->DupFileHandle(dos->Output());
-    BPTR err = dos->DupFileHandle(dos->ErrorOutput());
+    int len = strlen(console_prefix) + strlen(program) + strlen(console_suffix);
+    window_specifier = IExec->AllocVecTags(len + 1, AVT_Type, MEMF_SHARED, AVT_ClearWithValue, 0, TAG_DONE);
+    if (window_specifier == NULL) {
+        free(command);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    strcpy(window_specifier, console_prefix);
+    strcat(window_specifier, program);
+    strcat(window_specifier, console_suffix);
+
+    /*
+     * One window, three handles.
+     *
+     * NOT Open("CONSOLE:") for the other two: "CONSOLE:" means "the console of
+     * the process asking", which here is OURS -- the very reference a detached
+     * child must not hold, and gone the moment we exit.  In a spawn context it
+     * generally opens nothing at all, DOS substitutes NIL:, and the child runs
+     * with no output, which is what it did.
+     *
+     * DupFileHandle gives three independent handles onto the same window, which
+     * is what SYS_Asynch needs: DOS closes all three itself when the child
+     * exits, and closing the same handle three times would not end well.
+     */
+    BPTR in = dos->Open(window_specifier, MODE_NEWFILE);
+    BPTR out = in ? dos->DupFileHandle(in) : ZERO;
+    BPTR err = in ? dos->DupFileHandle(in) : ZERO;
 
     IExec->DebugPrintF("[AMIGA_PROCESS] spawnDetached: %s\n", command);
     rc = dos->SystemTags(command,
-                         SYS_Input,     0,
-                         SYS_Output,    0,
-                         SYS_Error,     0,
                          SYS_Input,     in,
                          SYS_Output,    out,
                          SYS_Error,     err,
@@ -297,6 +323,8 @@ static int spawnDetached(const char *program, const char *const *argv,
     pid = (int)dos->IoErr(); /* before any other DOS call */
     IExec->DebugPrintF("[AMIGA_PROCESS] spawnDetached: rc=%ld, pid=%d\n", rc, pid);
     free(command);
+    if (window_specifier)  
+        IExec->FreeVec(window_specifier);
 
     if (rc != 0)
     {
