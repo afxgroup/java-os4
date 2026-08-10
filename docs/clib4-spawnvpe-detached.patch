@@ -1,0 +1,124 @@
+diff --git a/library/include/unistd.h b/library/include/unistd.h
+index a220c231..c9b3d3f9 100755
+--- a/library/include/unistd.h
++++ b/library/include/unistd.h
+@@ -117,6 +117,10 @@ extern int spawnvp(int mode, const char *path, const char **argv);
+ /* Non standard. Used to help linux ports */
+ extern int spawnvpe(const char *file, const char **argv, char **deltaenv, const char *dir, int fhin, int fhout, int fherr);
+ extern int spawnvpe_fork(const char *file, const char **argv, char **deltaenv, const char *dir, int fhin, int fhout, int fherr);
++/* As spawnvpe(), but the child does not depend on this process: not a DOS
++   child, no death signal to this Task, no pointer to it.  For programs meant
++   to outlive their parent.  The returned pid cannot be waited for. */
++extern int spawnvpe_detached(const char *file, const char **argv, char **deltaenv, const char *dir, int fhin, int fhout, int fherr);
+ 
+ extern int profil(unsigned short *buffer, size_t bufSize, size_t offset, unsigned int scale);
+ extern long sysconf(int name);
+diff --git a/library/unistd/spawnvpe.c b/library/unistd/spawnvpe.c
+index 2351770c..1e55c603 100644
+--- a/library/unistd/spawnvpe.c
++++ b/library/unistd/spawnvpe.c
+@@ -17,15 +17,33 @@
+ #include "children.h"
+ #include "spawn_utils.h"
+ 
+-int
+-spawnvpe(
++/*
++ * detached: create a process that does NOT depend on this one.
++ *
++ * The normal spawn ties the child to its parent three ways: NP_Child makes it a
++ * DOS child, NP_NotifyOnDeathSigTask has it Signal() the parent's Task when it
++ * exits, and spawnData.parentTask hands the child a pointer to that Task.  All
++ * three are correct while the parent lives, and all three are dangling the
++ * moment it does not.
++ *
++ * A launcher or an auto-updater is exactly the case that breaks: the parent
++ * starts a program that is MEANT to outlive it, then exits.  The child is left
++ * signalling a freed Task and DOS is left holding the parent's process
++ * structure ("Parent #N deletion resuming, all children have now gone"), and
++ * the child crashes some time later, far from the cause.
++ *
++ * A detached child cannot be waited for -- waitpid() has nothing to wait on --
++ * which is the whole trade: independence in exchange for the exit status.
++ */
++static int spawnvpe_common(
+     const char *file,
+     const char **argv,
+     char **deltaenv,
+     const char *_cwd,
+     int fhin,
+     int fhout,
+-    int fherr
++    int fherr,
++    BOOL detached
+ ) {
+     int ret = -1;
+     struct name_translation_info nti_name;
+@@ -235,7 +253,9 @@ spawnvpe(
+     }
+ 
+     data->groupId = getgid();
+-    data->parentTask = FindTask(NULL);
++    /* A detached child must not hold a pointer to a Task that may be gone
++       before it looks at it. */
++    data->parentTask = detached ? NULL : FindTask(NULL);
+     data->parentUuid[0] = '\0';
+     data->fdInherit = fd_inherit;
+     data->freeData = TRUE;
+@@ -243,14 +263,16 @@ spawnvpe(
+         strncpy(data->parentUuid, __CLIB4->uuid, UUID4_LEN);
+ 
+     ret = SystemTags(full_command,
+-                    NP_NotifyOnDeathSigTask, me,
++                    /* Both of these bind the child's lifetime to ours; skipped
++                       when detached, so it outlives us cleanly. */
++                    detached ? TAG_SKIP : NP_NotifyOnDeathSigTask, me,
+                     SYS_Input,          iofh[0],
+                     SYS_Output,         iofh[1],
+                     SYS_Error,          iofh[2],
+                     NP_CloseError,      TRUE,
+                     SYS_UserShell,      TRUE,
+                     SYS_Asynch,         TRUE,
+-                    NP_Child,           TRUE,
++                    NP_Child,           detached ? FALSE : TRUE,
+                     NP_StackSize,       2024 * 1024,
+                     cwdLock ? NP_CurrentDir : TAG_SKIP, cwdLock,
+                     NP_Name,            process_name,
+@@ -328,3 +350,37 @@ spawnvpe(
+ 
+     return ret;
+ }
++
++int
++spawnvpe(
++    const char *file,
++    const char **argv,
++    char **deltaenv,
++    const char *_cwd,
++    int fhin,
++    int fhout,
++    int fherr
++) {
++    return spawnvpe_common(file, argv, deltaenv, _cwd, fhin, fhout, fherr, FALSE);
++}
++
++/*
++ * As spawnvpe(), but the child is independent of this process: it is not a DOS
++ * child, it does not signal this Task when it exits, and it is not given a
++ * pointer to it.  Returns a pid, but that pid cannot be waited for.
++ *
++ * For programs meant to outlive their parent -- launchers, auto-updaters,
++ * anything the caller starts and then exits.
++ */
++int
++spawnvpe_detached(
++    const char *file,
++    const char **argv,
++    char **deltaenv,
++    const char *_cwd,
++    int fhin,
++    int fhout,
++    int fherr
++) {
++    return spawnvpe_common(file, argv, deltaenv, _cwd, fhin, fhout, fherr, TRUE);
++}

@@ -157,6 +157,58 @@ Java_java_lang_AmigaDiag_openFdCount(JNIEnv *env, jclass clazz) {
     return (jint)count;
 }
 
+/*
+ * Detached spawning: the child does not depend on this process.
+ *
+ * clib4's spawnvpe ties the child to us three ways -- NP_Child makes it a DOS
+ * child, NP_NotifyOnDeathSigTask has it Signal() our Task when it exits, and
+ * spawnData.parentTask hands it a pointer to that Task.  Correct while we live;
+ * all three dangle the moment we do not.
+ *
+ * An auto-updater is precisely the case that breaks, and it is not exotic: the
+ * application runs `java` on an updater and then exits, so the thing it started
+ * is meant to outlive it.  What actually happened was a DSI in the grandchild
+ * after the shell had returned to the prompt, with DOS reporting "Parent #185
+ * deletion resuming, all children have now gone".
+ *
+ * spawnvpe_detached() (clib4, ours) skips all three.  THE TRADE IS REAL: a
+ * detached child is not in clib4's child table, so waitpid() has nothing to
+ * wait on and Process.waitFor() cannot report an exit status.  That is the
+ * choice -- a process that survives its parent, or an exit code from one that
+ * must not.  For the overwhelmingly common "start it and exit" it is the right
+ * way round, and setting AMIGA_PROCESS_DETACHED to 0 in the environment restores
+ * the old behaviour for a caller that really needs the status:
+ *
+ *     SetEnv AMIGA_PROCESS_DETACHED 0
+ *
+ * An environment variable rather than a system property because this is read
+ * from native code on a path where calling back into Java would cost more than
+ * the setting is worth, and because it has to be answerable before any Java
+ * property machinery is involved.
+ *
+ * REQUIRES the clib4 carrying spawnvpe_detached.  Declared here rather than
+ * taken from <unistd.h> so this builds against an SDK header that predates it;
+ * an older clib4 SOBJ will fail to resolve the symbol at load, loudly, which is
+ * better than silently reverting to the tethered spawn.
+ */
+extern int spawnvpe_detached(const char *file, const char **argv,
+                             char **deltaenv, const char *dir,
+                             int fhin, int fhout, int fherr);
+
+static int detachedSpawn(void) {
+    static int cached = -1;
+
+    if(cached < 0) {
+        /* Read once: this is per-VM policy, not per-call, and reading a system
+           property from a native on every exec would be its own cost. */
+        const char *v = getenv("AMIGA_PROCESS_DETACHED");
+
+        cached = (v != NULL && (v[0] == '0' || v[0] == 'n' || v[0] == 'N'))
+                 ? 0 : 1;
+    }
+    return cached;
+}
+
 /* ---- natives -------------------------------------------------------- */
 
 /*
@@ -278,9 +330,16 @@ Java_java_lang_UNIXProcess_forkAndExec(JNIEnv *env, jobject process,
      * Two live translations at once is within the buffer ring (4), and holding
      * both is exactly what it exists for.
      */
-    resultPid = (jint)spawnvpe(amiga_path(pprog), argv, (char **)envv,
+    if(detachedSpawn()) {
+        resultPid = (jint)spawnvpe_detached(amiga_path(pprog), argv,
+                               (char **)envv,
                                pdir != NULL ? amiga_path(pdir) : NULL,
                                childIn, childOut, childErr);
+    } else {
+        resultPid = (jint)spawnvpe(amiga_path(pprog), argv, (char **)envv,
+                               pdir != NULL ? amiga_path(pdir) : NULL,
+                               childIn, childOut, childErr);
+    }
 
     if (resultPid < 0) {
         goto CatchIO;
@@ -450,8 +509,14 @@ Java_java_lang_UNIXProcess_waitForProcessExit0(JNIEnv *env, jclass clazz,
             return (jint)status;
         }
         if (r < 0) {
-            /* ECHILD: already reaped, or never ours.  Nothing better to say
-               than "gone", and reporting failure would hang Process.waitFor. */
+            /* ECHILD: already reaped, never ours -- or DETACHED, which is now
+               the default and makes this the ordinary path rather than an edge
+               case.  A detached child is not in clib4's child table, so there
+               is nothing to wait on and no status to report; "exited, 0" is
+               what Process.waitFor gets.  That is the acknowledged cost of a
+               child that outlives us (see detachedSpawn), and it is why
+               AMIGA_PROCESS_DETACHED=0 exists for callers that need the real
+               status more than they need the child to survive. */
             return 0;
         }
         if (waited >= timeoutMillis) {
