@@ -1314,20 +1314,32 @@ index bf88d59..c663143 100644
          MethodBlock *mb = lookupMethod(excep->class, SYMBOL(printStackTrace),
                                                       SYMBOL(___V));
 diff --git a/src/init.c b/src/init.c
-index 32539cf..dddb9e1 100644
+index 32539cf..205a6a8 100644
 --- a/src/init.c
 +++ b/src/init.c
-@@ -26,7 +26,8 @@
+@@ -26,7 +26,20 @@
  
  #include "jam.h"
  
 -static int VM_initing = TRUE;
++/*
++ * The VM's own command-line arguments, for RuntimeMXBean.getInputArguments().
++ *
++ * Defined here rather than in jam.c because jam.c is linked into the
++ * jamvm-openjdk EXECUTABLE while the reader (jmm_GetInputArgumentArray) is in
++ * libjvm.so: a shared library resolving a symbol out of the program that loaded
++ * it is backwards, and works only where the loader puts the executable's
++ * symbols in the global scope.  parseCommandLine fills these in.
++ */
++char **vm_input_args = NULL;
++int vm_input_args_count = 0;
++
 +/* Not static: os/amiga/scanprocess.c references VM_initing via `extern int`. */
 +int VM_initing = TRUE;
  extern void initialisePlatform();
  
  unsigned long clampHeapLimit(long long limit) {
-@@ -34,6 +35,208 @@ unsigned long clampHeapLimit(long long limit) {
+@@ -34,6 +47,208 @@ unsigned long clampHeapLimit(long long limit) {
      return (unsigned long)MIN(clamp, MAX_MAX_HEAP);
  }
  
@@ -1536,7 +1548,7 @@ index 32539cf..dddb9e1 100644
  /* Setup default values for command line args */
  
  void setDefaultInitArgs(InitArgs *args) {
-@@ -60,14 +263,45 @@ void setDefaultInitArgs(InitArgs *args) {
+@@ -60,14 +275,45 @@ void setDefaultInitArgs(InitArgs *args) {
      args->java_stack = DEFAULT_STACK;
      args->max_heap   = phys_mem == 0 ? DEFAULT_MAX_HEAP
                                       : clampHeapLimit(phys_mem/4);
@@ -1583,7 +1595,7 @@ index 32539cf..dddb9e1 100644
  
  #ifdef INLINING
      args->replication_threshold = 10;
-@@ -89,34 +323,46 @@ int VMInitialising() {
+@@ -89,34 +335,46 @@ int VMInitialising() {
      return VM_initing;
  }
  
@@ -1790,7 +1802,7 @@ index e560f69..74fff16 100644
  
  #ifdef DIRECT
 diff --git a/src/jam.c b/src/jam.c
-index 052f84a..cfd0bf2 100644
+index 052f84a..3ac5146 100644
 --- a/src/jam.c
 +++ b/src/jam.c
 @@ -32,10 +32,19 @@
@@ -1831,7 +1843,7 @@ index 052f84a..cfd0bf2 100644
      printf("  -D<name>=<value> set a system property\n");
      printf("  -verbose[:class|gc|jni]\n");
      printf("\t\t   :class print out information about class loading, etc.\n");
-@@ -107,21 +120,46 @@ void showVersionAndCopyright() {
+@@ -107,21 +120,51 @@ void showVersionAndCopyright() {
      printf("but WITHOUT ANY WARRANTY; without even the implied warranty of\n");
      printf("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n");
      printf("GNU General Public License for more details.\n");
@@ -1877,13 +1889,18 @@ index 052f84a..cfd0bf2 100644
 + * Pointers into argv rather than copies: argv outlives the VM.  Only argv[i] --
 + * the main class, past the end of this range -- is ever rewritten (for -jar).
 + */
-+char **vm_input_args = NULL;
-+int vm_input_args_count = 0;
++/* DEFINED in init.c, which is part of libjvm.so.  This file is linked into the
++   jamvm-openjdk executable instead, and a shared library must not depend on a
++   symbol from the program that loaded it -- the packaging symbol sweep caught
++   exactly that ("libjvm.so references symbols nothing provides").  The
++   executable writing to the library's variable is the sound direction. */
++extern char **vm_input_args;
++extern int vm_input_args_count;
 +
  int parseCommandLine(int argc, char *argv[], InitArgs *args) {
      Property props[argc-1];
      int is_jar = FALSE;
-@@ -132,6 +170,9 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+@@ -132,6 +175,9 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
  
      for(i = 1; i < argc; i++) {
          if(*argv[i] != '-') {
@@ -1893,7 +1910,7 @@ index 052f84a..cfd0bf2 100644
              if(args->min_heap > args->max_heap) {
                  printf("Minimum heap size greater than max!\n");
                  status = 1;
-@@ -212,6 +253,18 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
+@@ -212,6 +258,18 @@ int parseCommandLine(int argc, char *argv[], InitArgs *args) {
                  } else if(strncmp(argv[i], "-Xbootclasspath/v:", 18) == 0) {
                      args->bootpath_v = argv[i] + 18;
  
@@ -1912,7 +1929,7 @@ index 052f84a..cfd0bf2 100644
                  /* Compatibility options */
                  } else if(strcmp(argv[i], "-client") == 0 ||
                            strcmp(argv[i], "-server") == 0) {
-@@ -251,10 +304,40 @@ int main(int argc, char *argv[]) {
+@@ -251,10 +309,40 @@ int main(int argc, char *argv[]) {
          exit(1);
      }
  
@@ -1954,7 +1971,7 @@ index 052f84a..cfd0bf2 100644
  
      for(cpntr = argv[class_arg]; *cpntr; cpntr++)
          if(*cpntr == '.')
-@@ -301,6 +384,5 @@ error:
+@@ -301,6 +389,5 @@ error:
      mainThreadWaitToExitVM();
      exitVM(status);
  
